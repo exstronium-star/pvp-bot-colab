@@ -125,6 +125,22 @@ clone can resume immediately. `--device auto` picks cuda on a GPU runtime.
 - checkpoints save every 25 iters; if colab kills the runtime, resume again.
 - when done: download `runs/kit1/ppo.pt` (Files panel, ~100KB), copy it over
   local `runs/kit1/ppo.pt`, then `python tools/export_policy.py` for the server.
+
+### Live dashboard on colab
+
+Run the trainer in one cell, then in another:
+
+```
+!cd dojo && (pgrep -f "http.server 8000" || nohup python -m http.server 8000 >/dev/null 2>&1 &)
+```
+
+```
+from google.colab import output
+output.serve_kernel_port_as_window(8000, path='/tools/dashboard.html?run=runs/kit1')
+```
+
+This opens the dashboard in a new tab (same ember theme, auto-refreshes every
+2s) reading `runs/kit1/metrics.jsonl` as training appends to it.
 - anti-coward rule lives in `mc_pvp/sim.py`: a timeout with no kill scores
   `R_TIMEOUT = -1.5` for BOTH sides, so fleeing until the clock runs out is
   worse than a fair fight (EV 0). Do not re-add an HP-lead timeout prize.
