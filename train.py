@@ -274,6 +274,7 @@ def main():
             elif mode == "league":
                 opp = ActorCritic(obs_dim, args.hidden)
                 opp.load_state_dict(pool[np.random.randint(len(pool))])
+                opp.to(device)
                 opp.eval()
             else:
                 opp = None
@@ -296,9 +297,10 @@ def main():
                     np.clip(err_pitch / MAX_LOOK, -1.0, 1.0),
                 ], axis=1).astype(np.float32)
 
+                dev = net_device(ppo.policy)
                 with torch.no_grad():
                     logp_t, _, value_t, _ = ppo.policy.evaluate(
-                        to_t(learner_obs), to_t(cont), to_t(disc))
+                        to_t(learner_obs, dev), to_t(cont, dev), to_t(disc, dev))
                 logp = logp_t.numpy()
                 value = value_t.numpy()
 
