@@ -1,0 +1,4 @@
+# training only needs numpy + torch. colab preinstalls CUDA torch -
+# leave this file alone there (pip would otherwise clobber it).
+torch
+numpy

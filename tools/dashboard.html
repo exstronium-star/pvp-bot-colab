@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PPO DOJO - training dashboard</title>
+<style>
+  :root {
+    --bg:#101010; --panel:#181810; --panel2:#202018; --line:#2b2823;
+    --txt:#f0f0f0; --dim:#b0b0b0; --faint:#6e6a63;
+    --ember:#ff6a3d; --ember-dim:#a03c1e; --teal:#2dd4bf; --gold:#e8b23a; --red:#c0392b;
+  }
+  * { box-sizing:border-box; margin:0; }
+  body { background:var(--bg); color:var(--txt);
+         font:14px/1.45 -apple-system,"Segoe UI",Inter,system-ui,sans-serif; padding:20px 24px; }
+  header { display:flex; align-items:baseline; gap:12px; margin-bottom:4px; }
+  header h1 { font-size:19px; font-weight:700; letter-spacing:.5px; }
+  header h1 .dot { color:var(--ember); }
+  header .run { color:var(--faint); font-size:12px; font-family:monospace; }
+  .tagline { color:var(--dim); font-size:13px; margin-bottom:16px; }
+  .tagline b { color:var(--ember); }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:10px; margin-bottom:12px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-left:3px solid var(--faint);
+          border-radius:6px; padding:9px 12px 8px; }
+  .card .k { font-size:10px; color:var(--dim); text-transform:uppercase; letter-spacing:1.2px; }
+  .card .v { font-size:24px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .card.up { border-left-color:var(--ember); } .card.up .v { color:var(--ember); }
+  .card.teal { border-left-color:var(--teal); } .card.teal .v { color:var(--teal); }
+  .card.gold { border-left-color:var(--gold); } .card.gold .v { color:var(--gold); }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:12px; }
+  @media (max-width:900px){ .grid{grid-template-columns:1fr;} }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:10px 14px 12px; }
+  .panel h2 { font-size:11px; color:var(--dim); margin-bottom:8px;
+              text-transform:uppercase; letter-spacing:1.5px; font-weight:600; }
+  .panel h2 .hint { color:var(--faint); text-transform:none; letter-spacing:0; font-weight:400; }
+  canvas { width:100%; height:190px; display:block; }
+  #events { max-height:200px; overflow-y:auto; font-family:ui-monospace,monospace; font-size:12px; }
+  #events div { padding:4px 0; border-bottom:1px solid #22211d; color:var(--dim); }
+  #events div b { color:var(--txt); font-weight:600; }
+  .ev-eval b { color:var(--gold); } .ev-saved b { color:var(--teal); }
+  .ev-stopped b,.ev-started b,.ev-resumed b { color:var(--ember); }
+  #status { color:var(--faint); font-size:12px; margin-top:10px; font-family:monospace; }
+</style>
+</head>
+<body>
+<header><h1><span class="dot">&#9679;</span> PPO DOJO</h1><span class="run" id="runname"></span></header>
+<div class="tagline" id="tagline">waiting for training data ...</div>
+<div class="cards" id="cards"></div>
+<div class="grid">
+  <div class="panel"><h2>avg reward <span class="hint">- want: up</span></h2><canvas id="c-ret"></canvas></div>
+  <div class="panel"><h2>entropy <span class="hint">- want: smooth decay</span></h2><canvas id="c-ent"></canvas></div>
+  <div class="panel"><h2>episode length <span class="hint">- ticks; short+low = stomped</span></h2><canvas id="c-len"></canvas></div>
+  <div class="panel"><h2>eval vs scripted <span class="hint">- win / draw / loss %</span></h2><canvas id="c-eval"></canvas></div>
+  <div class="panel"><h2>eval damage <span class="hint">- dealt vs taken</span></h2><canvas id="c-dmg"></canvas></div>
+  <div class="panel"><h2>losses <span class="hint">- policy / value</span></h2><canvas id="c-pv"></canvas></div>
+</div>
+<div class="panel"><h2>training events</h2><div id="events"></div></div>
+<div id="status"></div>
+<script>
+const q = new URLSearchParams(location.search);
+const run = q.get('run') || 'runs/kit1';
+document.getElementById('runname').textContent = run;
+const url = '../' + run + '/metrics.jsonl';
+
+let rows = [];
+async function poll() {
+  try {
+    const r = await fetch(url + '?t=' + Date.now());
+    if (!r.ok) { setStatus('waiting for ' + url + ' ...'); return; }
+    const txt = await r.text();
+    rows = txt.trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
+    render();
+    setStatus(rows.length + ' points | updated ' + new Date().toLocaleTimeString());
+  } catch (e) { setStatus('fetch failed: ' + e); }
+}
+function setStatus(s){ document.getElementById('status').textContent = s; }
+const last = a => a.length ? a[a.length-1] : undefined;
+const fin = v => v !== null && v !== undefined && isFinite(v);
+
+function card(k, v, cls) {
+  return `<div class="card ${cls||''}"><div class="k">${k}</div><div class="v">${v}</div></div>`;
+}
+function draw(id, series) {
+  const cv = document.getElementById(id), ctx = cv.getContext('2d');
+  const W = cv.width = cv.clientWidth * 2, H = cv.height = 380;
+  ctx.clearRect(0,0,W,H);
+  const all = series.flatMap(s => s.vals).filter(fin);
+  if (!all.length) return;
+  let mn = Math.min(...all), mx = Math.max(...all);
+  if (mn === mx) { mn -= 1; mx += 1; }
+  const pad = (mx-mn)*0.1; mn -= pad; mx += pad;
+  const n = Math.max(...series.map(s => s.vals.length));
+  const X = i => 8 + i*(W-16)/Math.max(n-1,1), Y = v => H-10-(v-mn)/(mx-mn)*(H-20);
+  ctx.strokeStyle = '#2b2823'; ctx.lineWidth = 1;
+  // faint gridlines
+  ctx.fillStyle = '#6e6a63'; ctx.font = '19px monospace';
+  for (const g of [0.25, 0.5, 0.75]) {
+    const y = H-10-g*(H-20);
+    ctx.beginPath(); ctx.moveTo(8,y); ctx.lineTo(W-8,y); ctx.stroke();
+  }
+  ctx.fillText(mx.toFixed(2), 12, 26); ctx.fillText(mn.toFixed(2), 12, H-12);
+  // bars rising from the bottom, grouped side-by-side for multi-series
+  const slot = (W-16)/Math.max(n,1), bw = Math.max(2, slot*0.7/series.length);
+  let li = 0;
+  series.forEach((s,si) => {
+    ctx.fillStyle = s.color;
+    s.vals.forEach((v,i) => { if(!fin(v)) return;
+      const cx = X(i) - bw*series.length/2 + si*bw;
+      const y1 = Y(v), y0 = H-10, w = Math.max(bw-1,1);
+      const top = Math.min(y0,y1), h = Math.abs(y1-y0), cap = Math.min(10, h);
+      ctx.globalAlpha = 0.5;
+      ctx.fillRect(cx, top, w, h);
+      ctx.globalAlpha = 1.0;
+      ctx.fillRect(cx, top, w, cap); });
+    ctx.fillText('\u25a0 ' + s.label, 130 + li*190, 26); li++;
+  });
+}
+
+function render() {
+  const pts = rows.filter(r => r.ret !== undefined);
+  const evs = rows.filter(r => r.event === 'eval');
+  const T = last(pts), E = last(evs);
+  const fmt = (o,k,d=2) => (o&&fin(o[k]))?o[k].toFixed(d):'-';
+  const tag = document.getElementById('tagline');
+  if (E) tag.innerHTML = `latest eval <b>iter ${E.iter}</b>: win <b>${(E.win_rate*100).toFixed(1)}%</b> ` +
+    `draw ${(E.draw_rate*100).toFixed(1)}% loss ${(E.loss_rate*100).toFixed(1)}% | dmg ${E.dmg_dealt.toFixed(1)}/${E.dmg_taken.toFixed(1)}`;
+  document.getElementById('cards').innerHTML =
+    card('iter', T?T.iter:'-') +
+    card('avg reward', fmt(T,'ret'), (T&&fin(T.ret)&&T.ret>0)?'up':'') +
+    card('entropy', fmt(T,'ent'), 'teal') +
+    card('ep length', (T&&fin(T.ep_len))?Math.round(T.ep_len):'-') +
+    card('win %', E?(E.win_rate*100).toFixed(1)+'%':'-', 'gold') +
+    card('episodes', (T&&fin(T.eps))?T.eps:'-');
+  draw('c-ret', [{label:'ret', color:'#ff6a3d', vals:pts.map(r=>r.ret)}]);
+  draw('c-ent', [{label:'entropy', color:'#2dd4bf', vals:pts.map(r=>r.ent)}]);
+  draw('c-len', [{label:'ep_len', color:'#e8b23a', vals:pts.map(r=>r.ep_len)}]);
+  draw('c-eval', [
+    {label:'win', color:'#ff6a3d', vals:evs.map(r=>r.win_rate*100)},
+    {label:'draw', color:'#8a8578', vals:evs.map(r=>r.draw_rate*100)},
+    {label:'loss', color:'#c0392b', vals:evs.map(r=>r.loss_rate*100)},
+  ]);
+  draw('c-dmg', [
+    {label:'dealt', color:'#ff6a3d', vals:evs.map(r=>r.dmg_dealt)},
+    {label:'taken', color:'#c0392b', vals:evs.map(r=>r.dmg_taken)},
+  ]);
+  draw('c-pv', [
+    {label:'pi', color:'#e8b23a', vals:pts.map(r=>r.pi)},
+    {label:'v', color:'#2dd4bf', vals:pts.map(r=>r.v)},
+  ]);
+  const ev2 = rows.filter(r => r.event).slice(-40).reverse();
+  document.getElementById('events').innerHTML = ev2.map(r => {
+    if (r.event === 'eval')
+      return `<div class="ev-eval"><b>[eval]</b> it ${r.iter}: win ${(r.win_rate*100).toFixed(1)}% loss ${(r.loss_rate*100).toFixed(1)}% draw ${(r.draw_rate*100).toFixed(1)}% | dmg ${r.dmg_dealt.toFixed(1)}/${r.dmg_taken.toFixed(1)}</div>`;
+    return `<div class="ev-${r.event}"><b>[${r.event}]</b> it ${r.iter ?? ''}</div>`;
+  }).join('');
+}
+poll(); setInterval(poll, 2000);
+</script>
+</body>
+</html>

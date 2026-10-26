@@ -1,0 +1,18 @@
+# generated / local-only: never commit
+runs/*
+!runs/kit1/
+runs/kit1/*
+!runs/kit1/ckpt.pt
+__pycache__/
+*.pyc
+*.log
+*.pid
+node_modules/
+session.jsonl
+# java bridge build outputs (source is committed, builds are not)
+ppo-bot/build/
+ppo-bot/.gradle/
+bridge/run/
+# local minecraft server copy (119M, machine-specific)
+server/
+*.jar
