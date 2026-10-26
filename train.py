@@ -301,8 +301,8 @@ def main():
                 with torch.no_grad():
                     logp_t, _, value_t, _ = ppo.policy.evaluate(
                         to_t(learner_obs, dev), to_t(cont, dev), to_t(disc, dev))
-                logp = logp_t.numpy()
-                value = value_t.numpy()
+                logp = logp_t.detach().cpu().numpy()
+                value = value_t.detach().cpu().numpy()
 
                 act = np.zeros((args.envs, 2, DuelEnv.ACTION_DIM), np.float32)
                 act[np.arange(args.envs), seat] = pack_action(cont, disc)
