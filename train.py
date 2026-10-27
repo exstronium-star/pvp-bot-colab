@@ -105,7 +105,7 @@ def act_batch(net: ActorCritic, obs: np.ndarray, deterministic=False):
 
 
 def build_net(state: dict, obs_dim: int, hidden: int,
-              device: torch.device) -> ActorCritic:
+              device: torch.device, verbose: bool = False) -> ActorCritic:
     ref = ActorCritic(obs_dim, hidden)
     ref_sd = ref.state_dict()
     # Backwards compat: checkpoints trained on 46-obs / 10-disc load into
@@ -147,12 +147,44 @@ def build_net(state: dict, obs_dim: int, hidden: int,
                 own[k] = ref_sd[k]
     net = ActorCritic(obs_dim, hidden)
     net.load_state_dict({**ref_sd, **own}, strict=True)
-    if missing:
+    if verbose and missing:
         print(f"build_net: carried {len(own)} tensors, "
               f"fresh {missing} (old brain upgraded)", flush=True)
     net.to(device)
     net.eval()
     return net
+
+
+def _widen_snapshot(state: dict, ref_sd: dict) -> dict:
+    """Widen one frozen league snapshot to the current brain shape.
+
+    Same rule as build_net: matched tensors copy, the 3 web obs columns and
+    the weave logit row init fresh. Runs once at resume, not every iter."""
+    own = {}
+    for k, v in state.items():
+        if k in ref_sd and ref_sd[k].shape == v.shape:
+            own[k] = v
+    for k in ("trunk.0.weight", "logits.weight", "logits.bias"):
+        if k in own or k not in state:
+            continue
+        old, new_shape = state[k], ref_sd[k].shape
+        if k == "trunk.0.weight" and len(new_shape) == 2:
+            w = torch.zeros(new_shape, dtype=old.dtype)
+            w[:, :old.shape[1]] = old
+            with torch.no_grad():
+                torch.nn.init.orthogonal_(w[:, old.shape[1]:], gain=0.1)
+            own[k] = w
+        elif k == "logits.weight" and len(new_shape) == 2:
+            w = torch.zeros(new_shape, dtype=old.dtype)
+            w[:old.shape[0]] = old
+            with torch.no_grad():
+                torch.nn.init.orthogonal_(w[old.shape[0]:], gain=0.01)
+            own[k] = w
+        elif k == "logits.bias" and len(new_shape) == 1:
+            b = torch.zeros(new_shape, dtype=old.dtype)
+            b[:old.shape[0]] = old
+            own[k] = b
+    return {**{k: v.detach().clone() for k, v in ref_sd.items()}, **own}
 
 
 def outcome_of(health, seat: int) -> int:
@@ -445,6 +477,17 @@ def main():
                     s[k] = v.to(device)
         history = ck.get("history", [])
         pool = ck.get("pool", [])
+        # widen frozen league snapshots ONCE at resume: they are old-shape
+        # (46x10) brains, and re-widening them every iter spams the log.
+        _narrow = [s for s in pool
+                   if s.get("trunk.0.weight", torch.zeros(0)).shape[1] != obs_dim
+                   or s.get("logits.weight", torch.zeros(0)).shape[0] != 11]
+        if _narrow:
+            ref = ActorCritic(obs_dim, args.hidden)
+            ref_sd = ref.state_dict()
+            pool = [_widen_snapshot(s, ref_sd) for s in pool]
+            print(f"resume: widened {len(_narrow)} league snapshots "
+                  f"to {obs_dim}x11 (once, quiet from here)", flush=True)
         start_it = int(ck.get("it", 0)) + 1
         with torch.no_grad():
             if args.reset_std:
