@@ -376,6 +376,13 @@ def main():
     ap.add_argument("--mirror-p", type=float, default=0.30)
     ap.add_argument("--champ-p", type=float, default=0.15,
                     help="share of envs vs the best-by-eval checkpoint")
+    ap.add_argument("--gate-iters", type=int, default=100,
+                    help="curriculum gate: before this iter, ALL bot_p envs "
+                         "face the dummy ScriptedBot and mirror/league/champ "
+                         "are off. A random brain loses 83%% of fights (kit1 "
+                         "iter 25: dealt 2, took 36); throwing Aggro at it on "
+                         "iter 1 teaches turtling, not fighting. After the "
+                         "gate the full style rotation + self-play unlock.")
     ap.add_argument("--league-k", type=int, default=3,
                     help="distinct league snapshots used per iteration")
     ap.add_argument("--single-seat", action="store_true",
@@ -575,8 +582,14 @@ def main():
                 if args.aux_iters > 0 else 0.0
 
             # ---- opponents for THIS iteration, per env -----------------------
-            kinds = draw_kinds(rng, E, args, have_pool=len(pool) > 0,
-                               have_champ=champ["state"] is not None)
+            # curriculum gate: pre-gate, everything is the killable dummy.
+            # Post-gate the full mix (styles + mirror + league + champ).
+            gated = it <= args.gate_iters and args.gate_iters > 0
+            if gated:
+                kinds = np.full(E, BOT, dtype=np.int64)
+            else:
+                kinds = draw_kinds(rng, E, args, have_pool=len(pool) > 0,
+                                   have_champ=champ["state"] is not None)
             bot_envs = np.flatnonzero(kinds == BOT)
             mirror_envs = np.flatnonzero(kinds == MIRROR)
             league_envs = np.flatnonzero(kinds == LEAGUE)
@@ -639,10 +652,10 @@ def main():
                 act = np.zeros((E, 2, DuelEnv.ACTION_DIM), np.float32)
                 act[slot_env, slot_seat] = pack_action(cont, disc)
                 if bot_envs.size:
-                    # role one style per env per iter: Aggro punishes
-                    # turtling, Turtle teaches the disable, Runner the
-                    # whiff-punish. Scripted stays the common case.
-                    style = style_bots[int(rng.integers(0, len(style_bots)))]
+                    # post-gate: role one style per env per iter. Pre-gate
+                    # everything is the dummy (gated kinds are all BOT).
+                    style = (style_bots[0] if gated else
+                             style_bots[int(rng.integers(0, len(style_bots)))])
                     bot_act = style.act(env)
                     act[bot_envs, other[bot_envs]] = bot_act[bot_envs,
                                                              other[bot_envs]]
