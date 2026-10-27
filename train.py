@@ -416,6 +416,7 @@ def main():
     if args.resume and resume_ckpt.exists():
         ck = torch.load(resume_ckpt, map_location="cpu", weights_only=False)
         # shape-upgrade path: old 46x10 brains widen into 49x11 (see build_net).
+        _upgraded = False
         try:
             ppo.policy.load_state_dict(ck["model"])
         except RuntimeError as e:
@@ -425,7 +426,19 @@ def main():
             # fresh head explores: reopen std so the new buttons get tried
             with torch.no_grad():
                 ppo.policy.log_std.fill_(-1.2)
-        ppo.opt.load_state_dict(ck["opt"])
+            _upgraded = True
+        if _upgraded:
+            # Adam's exp_avg / exp_avg_sq are param-shaped (128x46, 10x128).
+            # Loading them into a 128x49 / 11x128 net crashes on the first
+            # step with "size 46 must match 49". Old momentum points the
+            # wrong way anyway (it learned the old shape), so restart it:
+            # params + lr schedule carry, optimizer memory does not.
+            print("resume: optimizer state dropped (shape upgrade 46->49), "
+                  "fresh Adam, lr schedule kept", flush=True)
+            ppo.opt = torch.optim.Adam(ppo.policy.parameters(),
+                                       lr=ppo.opt.param_groups[0]["lr"], eps=1e-5)
+        else:
+            ppo.opt.load_state_dict(ck["opt"])
         for s in ppo.opt.state.values():
             for k, v in s.items():
                 if torch.is_tensor(v):
