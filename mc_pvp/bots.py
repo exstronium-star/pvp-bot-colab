@@ -399,6 +399,7 @@ class AggroBot:
             # then straight back. Axe-default meant slow 20t swings as the
             # neutral game and taught the learner to flap (weak hits).
             dis_op = (env.blocking[:, o] & (dist < 3.4) & env.on_ground[:, p])
+            has_axe = env.has_axe[:, p]
             want_axe = ~has_axe & dis_op
             want_sword = has_axe & ~dis_op
             swap = ((want_axe & ~self.prev_want_axe[:, p])
