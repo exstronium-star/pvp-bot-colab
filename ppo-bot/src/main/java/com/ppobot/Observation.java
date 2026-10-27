@@ -152,14 +152,21 @@ public final class Observation {
         return (float) clamp(inst.getDuration() / (double) max, 0.0, 1.0);
     }
 
-    /** Weaving time 0..1 (60s max in sim). Looked up by id so a missing
-     * registry entry degrades to 0 instead of breaking the build. */
+    /** Weaving time 0..1 (60s max in sim). Resolved reflectively so a
+     * missing registry entry (or a mapping rename) degrades to 0 instead
+     * of breaking the build. */
     public static Holder<MobEffect> weavingHolder() {
         try {
-            var key = net.minecraft.resources.ResourceLocation.parse("minecraft:weaving");
-            var got = net.minecraft.core.registries.BuiltInRegistries.MOB_EFFECT.get(key);
-            if (got.isPresent()) {
-                return net.minecraft.core.registries.BuiltInRegistries.MOB_EFFECT.wrapAsHolder(got.get());
+            Class<?> rl = Class.forName("net.minecraft.resources.ResourceLocation");
+            Object key = rl.getMethod("parse", String.class).invoke(null, "minecraft:weaving");
+            Class<?> regs = Class.forName("net.minecraft.core.registries.BuiltInRegistries");
+            Object mobFx = regs.getField("MOB_EFFECT").get(null);
+            Object got = mobFx.getClass().getMethod("get", Object.class).invoke(mobFx, key);
+            java.util.Optional<?> opt = (java.util.Optional<?>) got;
+            if (opt.isPresent()) {
+                Object eff = opt.get();
+                return (Holder<MobEffect>) mobFx.getClass().getMethod("wrapAsHolder", Object.class)
+                        .invoke(mobFx, eff);
             }
         } catch (Exception ignored) {
         }
