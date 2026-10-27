@@ -208,7 +208,7 @@ function render() {
     return `<div class="ev-${r.event}"><b>[${r.event}]</b> it ${r.iter ?? ''}</div>`;
   }).join('');
 }
-poll(); setInterval(poll, 2000);
+poll(); setInterval(poll, 250);
 </script>
 </body>
 </html>
