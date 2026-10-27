@@ -172,14 +172,25 @@ def test_shield_disable_stun():
     e = _kit_duel()
     for _ in range(6):
         e.step(_act1(A_BLOCK=1))
-    a = _act0(A_ATTACK=1, A_SPRINT=1, A_FWD=1, A_SWAP=1)
+    # sword sprint-hit must NOT disable (vanilla: axe only)
+    a = _act0(A_ATTACK=1, A_SPRINT=1, A_FWD=1)
     a[0, 1, sim.DuelEnv.A_BLOCK] = 1.0
-    vx_before = float(e.vx[0, 1])
     e.step(a)
-    dmg = 20.0 - float(e.health[0, 1])
-    kb = abs(float(e.vx[0, 1]) - vx_before * 0.5)
-    off = int(e.shield_off[0, 1])
-    ok = dmg > 0.5 and off == sim.SHIELD_DISABLE_TICKS and kb < 0.01
+    sword_off = int(e.shield_off[0, 1])
+    # axe sprint-hit MUST disable with the stun (no KB)
+    e2 = _kit_duel()
+    e2.has_axe[:] = True
+    for _ in range(6):
+        e2.step(_act1(A_BLOCK=1))
+    a2 = _act0(A_ATTACK=1, A_SPRINT=1, A_FWD=1)
+    a2[0, 0, sim.DuelEnv.A_SWAP] = 0.0  # already holding axe
+    a2[0, 1, sim.DuelEnv.A_BLOCK] = 1.0
+    vx_before = float(e2.vx[0, 1])
+    e2.step(a2)
+    dmg = 20.0 - float(e2.health[0, 1])
+    kb = abs(float(e2.vx[0, 1]) - vx_before * 0.5)
+    off = int(e2.shield_off[0, 1])
+    ok = (sword_off == 0) and (dmg > 0.5 and off == sim.SHIELD_DISABLE_TICKS and kb < 0.01)
     return ok
 
 
@@ -210,6 +221,40 @@ def test_gapple_eat():
         e.step(np.zeros((1, 2, sim.DuelEnv.ACTION_DIM), np.float32))
     full = abs(float(e.saturation[0, 0]) - 20.0) < 0.01
     return started and full
+
+
+def test_weave_web_speed():
+    """Weaving doubles web speed: 50% vs vanilla 25%."""
+    def trial(weave: bool):
+        e = _env()
+        e.px[0, 0] = -5.0
+        e.px[0, 1] = 5.0
+        e.pz[:] = 0.0
+        e.vx[:] = 0.0
+        e.vz[:] = 0.0
+        e.web_x[0, 0] = -5.0
+        e.web_z[0, 0] = 0.0
+        e.web_x[0, 1] = 5.0
+        e.web_z[0, 1] = 0.0
+        e.weave_t[:] = sim.WEAVE_DURATION if weave else 0
+        a = np.zeros((1, 2, sim.DuelEnv.ACTION_DIM), np.float32)
+        a[:, :, sim.DuelEnv.A_FWD] = 1.0
+        a[:, :, sim.DuelEnv.A_SPRINT] = 1.0
+        e.step(a)
+        return abs(float(e.vx[0, 0])), bool(e.in_web[0, 0])
+    v_w, in_w = trial(True)
+    v_b, in_b = trial(False)
+    ratio = v_w / max(v_b, 1e-9)
+    return in_w and in_b and abs(ratio - 2.0) < 0.15
+
+
+def test_shared_cooldown():
+    """Any swing resets BOTH cooldowns: sword->axe flapping buys nothing."""
+    e = _kit_duel()
+    e.cooldown[:] = sim.COOLDOWN_TICKS
+    e.axe_cd[:] = sim.AXE_COOLDOWN_TICKS
+    e.step(_act0(A_ATTACK=1))
+    return float(e.cooldown[0, 0]) == 0.0 and float(e.axe_cd[0, 0]) == 0.0
 
 
 def _kb_distance(sprint: bool) -> float:
@@ -255,7 +300,9 @@ def main():
     rows.append((sprint > walk, "sprint KB > walk KB", f"{walk:5.2f} / {sprint:5.2f}", ""))
 
     check("shield blocks frontal", *test_shield_blocks())
-    rows.append((test_shield_disable_stun(), "axe disables + stun (no KB)", "", ""))
+    rows.append((test_shield_disable_stun(), "axe disables + stun (sword does NOT)", "", ""))
+    rows.append((test_weave_web_speed(), "weave 50% vs base 25% in web", "", ""))
+    rows.append((test_shared_cooldown(), "shared attack lockout (no swap spam)", "", ""))
     check("strength II +6 raw", *test_strength_bonus())
     rows.append((test_splash_heal(), "splash Healing II +8", "", ""))
     rows.append((test_gapple_eat(), "gapple 32t -> sat 20", "", ""))

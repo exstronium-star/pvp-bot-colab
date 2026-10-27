@@ -42,7 +42,7 @@ def main(path="runs/ppo.pt", n=16, ticks=1200):
         cont, disc = cont.numpy(), disc.numpy()
 
         dist = np.hypot(env.px[:, 0] - env.px[:, 1], env.pz[:, 0] - env.pz[:, 1])
-        err_yaw, _ = aim_delta(env, np.zeros(n, np.int64))
+        err_yaw, _ = aim_delta(env, np.arange(n), np.zeros(n, np.int64))
         in_reach.append((dist <= REACH).mean())
         aimed.append((np.abs(err_yaw) < 15.0).mean())
         dists.append(dist.mean())

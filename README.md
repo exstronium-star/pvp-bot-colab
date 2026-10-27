@@ -160,9 +160,10 @@ This opens the dashboard in a new tab (same ember theme, auto-refreshes every
 
 ## Open questions (need a human who actually plays)
 
-1. **Sprint-hit knockback** — how much further than a non-sprint hit? Sim
-   currently uses +0.5 horizontal, which has not been validated.
-2. **Does a sprint hit reset your sprint** in 1.21? (`SPRINT_CANCELS_ON_HIT`)
+- [x] sprint-hit knockback — HT3 ground truth: **1.9x** a standing hit
+  (`SPRINT_KNOCKBACK_MULT = 1.9` in the sim, was an unvalidated +0.5)
+- [x] sprint reset on hit — HT3: **no reset** (`SPRINT_CANCELS_ON_HIT = False`),
+  which is why W-tap / S-tap spacing works
 3. **Crits** — in 1.9+ sword, is jump-critting actually worth it, or does the
    airtime lose you the trade?
 4. **Kit** — currently 20 HP, diamond sword, no armour, no offhand, flat arena.

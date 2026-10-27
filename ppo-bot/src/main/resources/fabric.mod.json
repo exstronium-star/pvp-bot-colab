@@ -1,0 +1,24 @@
+{
+	"schemaVersion": 1,
+	"id": "ppo-bot",
+	"version": "${version}",
+	"name": "PPO Bot",
+	"description": "Runs the trained PPO PvP policy on a HeroBot fake player. Server-side only; no client mod required.",
+	"authors": [
+		"BankBoi001"
+	],
+	"license": "MIT",
+	"environment": "server",
+	"entrypoints": {
+		"main": [
+			"com.ppobot.PpoBot"
+		]
+	},
+	"depends": {
+		"fabricloader": ">=0.19.5",
+		"minecraft": "~1.21.11",
+		"java": ">=21",
+		"fabric-api": "*",
+		"herobot": "*"
+	}
+}

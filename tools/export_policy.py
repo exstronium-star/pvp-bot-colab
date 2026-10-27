@@ -85,7 +85,8 @@ def main():
         for k in order:
             f.write(w[k].tobytes(order="C"))
 
-    # parity check against the torch policy
+    # parity check against the torch policy (widened the same way PPO.load does,
+    # so old 46x10 checkpoints verify against the current 49x11 sim)
     from mc_pvp.ppo import PPO
     net = PPO.load(args.ckpt, obs_dim)
     rng = np.random.default_rng(0)
@@ -93,10 +94,15 @@ def main():
     mu, logits, probs = reference_forward(w, obs)
     with torch.no_grad():
         t_mu, _, t_logits, _ = net.forward(torch.as_tensor(obs))
+    # old checkpoints have fewer heads: compare the overlapping prefix
+    d_old = logits.shape[1]
+    t_logits = t_logits.numpy()[:, :d_old]
+    t_probs = 1.0 / (1.0 + np.exp(-t_logits))
     print(f"obs_dim {obs_dim}  hidden {hidden}  cont {cont}  disc {disc}")
     print(f"mu max abs error      {np.abs(mu - t_mu.numpy()).max():.2e}")
-    print(f"logit max abs error   {np.abs(logits - t_logits.numpy()).max():.2e}")
-    print(f"attack prob (sample)  {probs[:, 2].round(2)}")
+    print(f"logit max abs error   {np.abs(logits - t_logits).max():.2e}")
+    print(f"attack prob (sample)  {t_probs[:, 2].round(2)}")
+    print(f"exported heads: obs {obs_dim} disc {d_old} (bridge accepts 10 or 11)")
     print(f"wrote {out}  ({out.stat().st_size:,} bytes)")
 
     if args.copy_to:

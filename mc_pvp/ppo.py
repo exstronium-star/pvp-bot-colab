@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 
 CONT_DIM = 4   # yaw, pitch, forward, strafe
-DISC_DIM = 10  # jump, sprint, attack, block, swap, eat, spl_heal/str/spd/fir
+DISC_DIM = 11  # jump, sprint, attack, block, swap, eat, spl_heal/str/spd/fir/weave
 LOG_STD_MIN, LOG_STD_MAX = -3.0, 0.0
 
 
@@ -146,7 +146,35 @@ class PPO:
 
     @staticmethod
     def load(path: str, obs_dim: int) -> ActorCritic:
+        sd = torch.load(path, map_location="cpu", weights_only=True)
+        if isinstance(sd, dict) and "model" in sd and "trunk.0.weight" not in sd:
+            sd = sd["model"]  # full ckpt.pt passed by mistake: use its model
+        ref = ActorCritic(obs_dim)
+        ref_sd = ref.state_dict()
+        # same widening rule as train.py:build_net: old 46x10 / 23x3 brains
+        # load into the current shape, new rows train fresh.
+        own = {}
+        for k, v in sd.items():
+            if k in ref_sd and ref_sd[k].shape == tuple(v.shape):
+                own[k] = v
+        for k in ("trunk.0.weight", "logits.weight", "logits.bias"):
+            if k in own or k not in sd:
+                continue
+            old = sd[k]
+            new_shape = ref_sd[k].shape
+            if k == "trunk.0.weight":
+                w = torch.zeros(new_shape, dtype=old.dtype)
+                w[:, :old.shape[1]] = old
+                own[k] = w
+            elif k == "logits.weight":
+                w = torch.zeros(new_shape, dtype=old.dtype)
+                w[:old.shape[0]] = old
+                own[k] = w
+            elif k == "logits.bias":
+                b = torch.zeros(new_shape, dtype=old.dtype)
+                b[:old.shape[0]] = old
+                own[k] = b
         net = ActorCritic(obs_dim)
-        net.load_state_dict(torch.load(path, map_location="cpu"))
+        net.load_state_dict({**ref_sd, **own}, strict=True)
         net.eval()
         return net

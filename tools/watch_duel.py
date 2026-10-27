@@ -29,7 +29,7 @@ def run_duel(ckpt: str, max_ticks: int, seed: int):
     net = PPO.load(ckpt, obs.shape[-1])
     bot = ScriptedBot(1, np.random.default_rng(seed + 1))
 
-    T = {"px": [], "hp": [], "blk": [], "eat": [], "gap": [], "heal": [],
+    T = {"px": [], "pz": [], "hp": [], "blk": [], "eat": [], "gap": [], "heal": [],
          "hits": [], "dis": [], "spl": [], "outcome": ""}
     prev_off = env.shield_off.copy()
     prev_heal = env.n_heal.copy()
@@ -45,6 +45,7 @@ def run_duel(ckpt: str, max_ticks: int, seed: int):
         for f in info.get("finished", []):
             pass
         T["px"].append(env.px[0].copy())
+        T["pz"].append(env.pz[0].copy())
         T["hp"].append(env.health[0].copy())
         T["blk"].append(env.blocking[0].copy())
         T["eat"].append(env.eating[0].copy())
@@ -70,7 +71,7 @@ def run_duel(ckpt: str, max_ticks: int, seed: int):
             break
     T["outcome"] = ("policy wins" if winner == 0 else
                     "scripted wins" if winner == 1 else "draw/timeout")
-    for k in ("px", "hp", "blk", "eat", "gap", "heal"):
+    for k in ("px", "pz", "hp", "blk", "eat", "gap", "heal"):
         T[k] = np.array(T[k])
     return T, env
 
@@ -102,15 +103,15 @@ def svg(T, env, path: str):
          f'fill="#181d24" stroke="#3a4350"/>']
     # spawn markers
     for p in (0, 1):
-        s.append(f'<circle cx="{X(T["px"][0, p, 0]):.1f}" cy="{Z(T["px"][0, p, 2]):.1f}" '
+        s.append(f'<circle cx="{X(T["px"][0, p]):.1f}" cy="{Z(T["pz"][0, p]):.1f}" '
                  f'r="5" fill="none" stroke="{cols[p]}" stroke-dasharray="3,2"/>')
     # trails
     for p in (0, 1):
         pts = " ".join(f"{X(x):.1f},{Z(z):.1f}"
-                       for x, z in T["px"][::step, p, [0, 2]])
+                       for x, z in zip(T["px"][::step, p], T["pz"][::step, p]))
         s.append(f'<polyline points="{pts}" fill="none" stroke="{cols[p]}" '
                  f'stroke-width="2" opacity="0.75"/>')
-        ex, ez = T["px"][-1, p, 0], T["px"][-1, p, 2]
+        ex, ez = T["px"][-1, p], T["pz"][-1, p]
         s.append(f'<circle cx="{X(ex):.1f}" cy="{Z(ez):.1f}" r="6" fill="{cols[p]}"/>')
     # hits
     for t, atk, dmg, x, z in T["hits"]:
@@ -129,7 +130,7 @@ def svg(T, env, path: str):
     for i in range(0, n, 20):
         for p in (0, 1):
             if T["eat"][i, p] > 0:
-                x, z = T["px"][i, p, 0], T["px"][i, p, 2]
+                x, z = T["px"][i, p], T["pz"][i, p]
                 s.append(f'<circle cx="{X(x):.1f}" cy="{Z(z):.1f}" r="9" fill="none" '
                          f'stroke="{cols[p]}" stroke-dasharray="2,2"/>')
 

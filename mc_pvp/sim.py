@@ -88,9 +88,13 @@ STR_BONUS = 6.0             # CERTAIN (Strength II: +3 per level, Java)
 SPD_MULT = 1.2              # CERTAIN (Speed I: +20% move)
 FIRE_TICKS = 8 * 20         # Fire Aspect II: ~8s burn (1 dmg/s through armour)
 # Weaving (movement half only, phase 1): 50% speed in web vs 25% without.
-# Phase 1 has no webs, so this is a latent flag consumed in phase 2.
 WEAVE_WEB_MULT = 0.5        # HT3: 50% of original speed in web
 BASE_WEB_MULT = 0.25        # vanilla web slow
+WEAVE_DURATION = 20 * 60    # weaving effect lasts 60s once splashed
+# Webs: 2 patches per duel, radius in blocks. Phase 2 models movement +
+# escape only (no headweb damage, no fullbox). Web positions random per reset.
+N_WEBS = 2
+WEB_RADIUS = 0.9
 # Full maxed diamond armour (Prot IV, no Thorns): 20 armour, 8 toughness
 # (2 per piece), EPF 5 per Prot IV piece -> 20 total. Deterministic 1.21
 # CombatRules: absorb then magic-absorb, no random roll in modern versions.
@@ -103,8 +107,8 @@ BASE_KNOCKBACK_H = 0.30     # CALIBRATED against real 1.21.11 (tools/calibrate_k
                             # vanilla source reads 0.4; the measured arc needs 0.30
 BASE_KNOCKBACK_V = 0.4      # vanilla LivingEntity.knockback strength
 RESTING_VY = -0.0784        # a grounded entity's leftover vy (g * 0.98)
-SPRINT_KNOCKBACK_BONUS_H = 0.5  # TUNING - needs a human check (HT3 feel)
-SPRINT_CANCELS_ON_HIT = True    # TUNING - does a 1.21 sprint hit reset sprint?
+SPRINT_KNOCKBACK_MULT = 1.9  # HT3 ground truth: sprint-hit deals 190% knockback
+SPRINT_CANCELS_ON_HIT = False   # HT3 ground truth: landing a hit does NOT reset sprint
 
 
 def damage_after_armor(raw: np.ndarray) -> np.ndarray:
@@ -132,15 +136,61 @@ R_DAMAGE = 0.15
 R_WHIFF = -0.002   # per whiffed swing; spamming attack should not be free
                    # but at 1.6 swings/s this must stay small vs the win bonus
 R_WIN = 1.0
-# Anti-coward rule: if nobody wins, everybody loses. A fair fight is
-# zero-sum (EV 0), so a timeout MUST score below 0 - otherwise the policy
-# learns that fleeing + eating gapples until the clock runs out beats
-# fighting. The old HP-lead prize taught exactly that (draws hit 100%).
-R_TIMEOUT = -1.5
+# Anti-coward rule: a timeout (draw) must score strictly worse than
+# LOSING. A loss teaches the value function what dying costs; a draw used
+# to pay -1.5 = free damage-lessons, so the policy turtled into timeouts
+# (block 65% + eat 28%, ~6 dmg/duel at iter 131) instead of fighting.
+# Losing now pays -R_WIN + damage dealt (you fought); drawing pays
+# R_TIMEOUT plus the stall bills (you refused). Engaging and dying beats
+# turtling out the clock.
+R_TIMEOUT = -3.0
+# Cowardice clock: a timeout also bills per-tick stall penalties, capped.
+# Bloodless stalling costs R_COWARD_TICK/tick (cap R_COWARD_CAP); blocking
+# out of range costs R_TURTLE_TICK/tick (cap R_TURTLE_CAP); eating while
+# nobody bleeds costs R_STALL_EAT_TICK/tick (cap R_STALL_EAT_CAP). A long
+# honest fight resets the bloodless clock on every hit, so only stalling is
+# billed. Episodes that end in a kill ignore all three.
+R_COWARD_TICK = -0.002   # per tick with no damage from either side
+R_COWARD_CAP = -1.0      # floor on the accumulated bloodless bill
+R_TURTLE_TICK = -0.004   # per tick blocking while the enemy is out of reach
+R_TURTLE_CAP = -1.5      # floor on the accumulated turtle bill
+R_STALL_EAT_TICK = -0.01  # per tick eating while nobody bleeds
+R_STALL_EAT_CAP = -1.5    # floor on the accumulated stall-eat bill
 # Potential-based shaping on "distance outside reach". Sums to ~0 over an
 # episode, so it cannot be farmed, but it gives a gradient for closing in -
 # without it a random policy never lands a hit and gets no learning signal.
 R_APPROACH = 0.012
+# --- HT3 gamesense rewards (agents.md) ------------------------------------
+# All event-based (fire on hits/uses), so they cannot be farmed by stalling.
+# Per-tick terms are potential-shaped or tiny by design.
+R_SAT_HIT = 0.03      # hit landed while saturated (>=18): the golden rule (Q2)
+R_OPENER = 0.15       # episode's first damage is an axe crit: the HT3 opener (Q1)
+R_WHIFFPUNISH = 0.15  # crit landed within 1s of the opponent's whiff (Q6)
+R_CRITBACK = 0.10     # own crit within 1s of taking a crit: answer back (follow-up B)
+R_DISABLE = 0.20      # landing a shield disable: the stun that starts combos (Q5)
+R_BLOCK = 0.02        # shield negates an incoming hit cleanly (Q12)
+R_EAT_SAFE = 0.10     # finished eating at <=12 HP out of reach (Q7)
+R_POT_HEAL = 0.05     # splash heal thrown at <=12 HP (Q9)
+R_REPOT = 0.10        # str re-thrown near/after expiry: repot instantly (Q11)
+R_EGAP_WASTE = -0.05  # egap burned while safe (enemy out of reach) (Q8)
+R_TURTLE = -0.001     # shield held up while enemy is out of range (Q12)
+R_EDGE = -0.002       # backed within 2 blocks of the wall (Q15)
+R_SHELTER = 0.024     # 2x approach pull, outward, while own shield disabled (Q13)
+# ---- combo / discipline rewards (weak-hit + swap-spam fixes) ---------------
+R_FULL = 0.05         # hit landed at >=90% charge: full-charge discipline
+R_WEAK = -0.04        # hit landed at <60% charge: weak-hit spam tax
+R_SWAP = -0.01        # per attribute-swap edge: swaps must earn (disable), not flap
+R_SPRINT_CLOSE = 0.001  # per tick sprinting with forward input, close up (<6 blocks)
+                        # small: crits (which need no-sprint) still outpay it when timed
+# ---- web / weaving rewards (phase 2) ------------------------------------
+R_IN_WEB = -0.002     # per tick stuck in a web: learn to get out
+R_WEB_ESCAPE = 0.15   # exited a web: the escape itself
+R_WEAVE_USE = 0.08    # weaving splash thrown while in a web: correct answer
+
+# ---- wasteful-action penalties (diag showed block 0.98, eat 0.71, splash 0.92) ---
+R_EAT_WASTE = -0.05   # eat while saturated + full HP: not worth the downtime
+R_POT_WASTE = -0.05   # splash heal when HP is already high
+R_BLOCK_OUT_OF_RANGE = -0.004  # blocking inside the turtle zone is now doubly discouraged
 
 
 def forward_right(yaw_deg: np.ndarray):
@@ -168,7 +218,8 @@ class DuelEnv:
     A_JUMP, A_SPRINT, A_ATTACK = range(4, 7)                            # discrete
     A_BLOCK, A_SWAP = range(7, 9)                                       # discrete
     A_EAT, A_SPL_HEAL, A_SPL_STR, A_SPL_SPD, A_SPL_FIR = range(9, 14)    # discrete
-    N_CONT, N_DISC = 4, 10
+    A_WEAVE = 14                                                        # discrete: weaving splash at own feet
+    N_CONT, N_DISC = 4, 11
     ACTION_DIM = N_CONT + N_DISC
 
     def __init__(self, n_envs: int = 16, seed: int = 0, arena: float = DEFAULT_ARENA,
@@ -203,7 +254,13 @@ class DuelEnv:
         self.str_t = np.zeros(n2, np.int32)             # Strength II ticks left
         self.spd_t = np.zeros(n2, np.int32)             # Speed I ticks left
         self.fir_t = np.zeros(n2, np.int32)             # Fire Res ticks left
-        self.weave = np.ones(n2, bool)                  # Weaving movement flag (spawn always)
+        self.weave = np.ones(n2, bool)                  # legacy flag (kept for compat, use weave_t)
+        self.weave_t = np.zeros(n2, np.int32)           # weaving effect ticks left (0 = off)
+        self.n_weave = np.zeros(n2, np.int32)            # weaving splash pots left
+        self.in_web = np.zeros(n2, bool)                 # inside a cobweb this tick
+        self.was_in_web = np.zeros(n2, bool)             # inside a cobweb last tick (escape detect)
+        self.web_x = np.zeros((n_envs, N_WEBS), np.float32)  # web patch centres
+        self.web_z = np.zeros((n_envs, N_WEBS), np.float32)
         self.n_gap = np.zeros(n2, np.int32)             # gapples left (64+64 carry)
         self.n_egap = np.zeros(n2, np.int32)            # ench gapples left (2)
         self.n_heal = np.zeros(n2, np.int32)            # splash Healing II left
@@ -216,11 +273,32 @@ class DuelEnv:
         self.hurt_timer = np.zeros(n2, np.int32)      # ticks of i-frames left
         self.since_hit = np.zeros(n2, np.int32)       # ticks since this player landed a hit
         self.since_hurt = np.zeros(n2, np.int32)      # ticks since this player took damage
+        self.since_opp_whiff = np.zeros(n2, np.int32)  # ticks since the opponent whiffed (punish window)
+        self.since_took_crit = np.zeros(n2, np.int32)  # ticks since this player took a crit (crit-back window)
+        self.since_str_out = np.full(n2, 999, np.int32)  # ticks since Str II expired (repot window)
         self.prev_attack = np.zeros(n2, bool)         # attack button last tick (edge trigger)
+        self.prev_swap = np.zeros(n2, bool)           # swap key last tick (edge trigger)
+        # --- bridge governors (mirrored in BotController.java) ----------------
+        # The bridge suppresses toddler exploits: at most one splash per 30
+        # ticks (shared across all four pot types), eat only when needy with
+        # a 40-tick gap between gapples, and no re-turtle for 10 ticks after
+        # potting. The sim must enforce the same, or the policy learns a
+        # chug-and-turtle exploit that the bridge then neuters on the server.
+        self.spl_cd = np.zeros(n2, np.int32)          # ticks until next splash allowed
+        self.eat_cd = np.zeros(n2, np.int32)          # ticks until next eat may start
+        self.blk_sup = np.zeros(n2, np.int32)         # ticks of forced shield-down after a pot
+        self.coward = np.zeros(n_envs, np.float32)    # accumulated bloodless-stall penalty
+        self.turtle_bill = np.zeros(n2, np.float32)  # per-seat out-of-range block bill
+        self.eat_bill = np.zeros(n2, np.float32)     # per-seat bloodless-eat bill
         self.prev_pen = np.zeros(n_envs, np.float32)  # distance outside reach, last tick
         self.ep_ret = np.zeros(n2, np.float32)
         self.ep_dmg = np.zeros(n2, np.float32)
         self.ep_len = np.zeros(n_envs, np.int32)
+        # Drill id active in each env (0 = melee, 1 = heal-or-die). The policy
+        # cannot see it: HP / distance / timers are all ordinary obs features,
+        # so there is no fingerprint to exploit, only the situation itself.
+        self.drill = np.zeros(n_envs, np.int32)
+        self.drill_p = 0.0  # set per-iter by the trainer; 0 = all melee
         self.tick = 0
         self.reset()
 
@@ -247,10 +325,17 @@ class DuelEnv:
         self.raise_t[:] = 0
         self.shield_off[:] = 0
         self.fire_t[:] = 0
-        self.str_t[:] = STR_DURATION    # pre-potted: Str II + Speed I + Fire Res + Weaving
+        self.str_t[:] = STR_DURATION    # pre-potted: Str II + Speed I + Fire Res
         self.spd_t[:] = SPD_DURATION
         self.fir_t[:] = FIR_DURATION
-        self.weave[:] = True
+        self.weave[:] = False
+        self.weave_t[:] = 0             # no weaving until splashed (throw it in webs)
+        self.n_weave[:] = N_WEAVE_POTS
+        self.in_web[:] = False
+        self.was_in_web[:] = False
+        # 2 web patches per duel, off to the sides so spawn lane stays clean
+        self.web_x[:] = self.rng.uniform(-8.0, 8.0, size=(n, N_WEBS)).astype(np.float32)
+        self.web_z[:] = self.rng.uniform(4.0, 10.0, size=(n, N_WEBS)).astype(np.float32) * np.where(self.rng.random((n, N_WEBS)) < 0.5, -1.0, 1.0).astype(np.float32)
         self.n_gap[:] = 128             # 64 hotbar + 64 inventory
         self.n_egap[:] = 2
         self.n_heal[:] = N_HEAL_POTS
@@ -263,7 +348,17 @@ class DuelEnv:
         self.hurt_timer[:] = 0
         self.since_hit[:] = 999
         self.since_hurt[:] = 999
+        self.since_opp_whiff[:] = 999
+        self.since_took_crit[:] = 999
+        self.since_str_out[:] = 999
         self.prev_attack[:] = False
+        self.prev_swap[:] = False
+        self.spl_cd[:] = 0
+        self.eat_cd[:] = 0
+        self.blk_sup[:] = 0
+        self.coward[:] = 0.0
+        self.turtle_bill[:] = 0.0
+        self.eat_bill[:] = 0.0
         self.on_ground[:] = True
         self.pitch[:] = 0.0
         # spawn: symmetric, 16 blocks apart (Money SMP start), facing each other
@@ -275,6 +370,9 @@ class DuelEnv:
         self.yaw[:, 0] = np.where(side > 0, 90.0, 270.0)
         self.yaw[:, 1] = np.where(side > 0, 270.0, 90.0)
         self.prev_pen[:] = np.maximum(self._dist() - REACH, 0.0)
+        # drills reroll a share of envs AFTER the standard spawn above.
+        self.drill[:] = 0
+        self._apply_drill(np.arange(n))
         return self.obs()
 
     def _dist(self) -> np.ndarray:
@@ -350,7 +448,7 @@ class DuelEnv:
             np.clip(self.str_t / STR_DURATION, 0, 1),
             np.clip(self.spd_t / SPD_DURATION, 0, 1),
             np.clip(self.fir_t / FIR_DURATION, 0, 1),
-            self.weave.astype(np.float32),
+            np.clip(self.weave_t / WEAVE_DURATION, 0, 1),
             np.clip(self.n_gap / 128.0, 0, 1),
             np.clip(self.n_egap / 2.0, 0, 1),
             np.clip(self.n_heal / 4.0, 0, 1),
@@ -363,6 +461,10 @@ class DuelEnv:
             self.has_axe[np.arange(self.n)[:, None], opp].astype(np.float32),
             np.clip(self.str_t[np.arange(self.n)[:, None], opp] / STR_DURATION, 0, 1),
             np.clip(self.absorb[np.arange(self.n)[:, None], opp] / 8.0, 0, 1),
+            # --- web / weaving reads (phase 2) ---
+            self.in_web.astype(np.float32),
+            self.weave_t[np.arange(self.n)[:, None], opp] / WEAVE_DURATION,
+            np.clip(self.n_weave / 3.0, 0, 1),
         ]
         out = np.stack(feats, axis=-1).astype(np.float32)
         self.obs_dim = out.shape[-1]
@@ -391,21 +493,35 @@ class DuelEnv:
         want_str = act[..., self.A_SPL_STR] > 0.5
         want_spd = act[..., self.A_SPL_SPD] > 0.5
         want_fir = act[..., self.A_SPL_FIR] > 0.5
+        want_weave = act[..., self.A_WEAVE] > 0.5
 
         # vanilla: sprinting requires forward input
         self.sprinting = want_sprint & (fwd_in > 0.1)
 
-        # ---- weapon swap: instant attribute swap, same tick (HT3) ----------
-        self.has_axe = np.where(want_swap, ~self.has_axe, self.has_axe)
+        # weapon swap: edge-triggered toggle, same tick (HT3). Holding the
+        # key does not flap: matches vanilla (and the bridge, which pulses
+        # the hotbar select), and kills the zero-cost swap spam the policy
+        # learned when holding swap toggled every tick.
+        swap_edge = want_swap & ~self.prev_swap
+        self.has_axe = np.where(swap_edge, ~self.has_axe, self.has_axe)
 
         # ---- shield raise: 250ms delay, only while not disabled ------------
-        can_raise = want_block & (self.shield_off == 0)
+        # Bridge mirror: no re-turtle for 10 ticks after potting (BotController
+        # sets blockSuppress=10 on every splash so the bot opens up).
+        self.blk_sup = np.maximum(self.blk_sup - 1, 0)
+        can_raise = want_block & (self.shield_off == 0) & (self.blk_sup == 0)
         self.raise_t = np.where(can_raise, self.raise_t + 1, 0)
         self.blocking = can_raise & (self.raise_t >= SHIELD_RAISE_TICKS)
         self.shield_off = np.maximum(self.shield_off - 1, 0)
 
         # ---- eating: 32 ticks locked in, cannot block while eating ----------
-        start_eat = want_eat & (self.eating == 0)
+        # Bridge mirror (BotController.eatAllowed): only when needy (HP<20
+        # or saturation<18) and 40+ ticks since the last gapple finished.
+        # Without this the policy chain-eats behind its shield - free on the
+        # sim, suppressed on the server, so the transfer dies.
+        self.eat_cd = np.maximum(self.eat_cd - 1, 0)
+        needy = (self.health < 20.0) | (self.saturation < 18.0)
+        start_eat = want_eat & (self.eating == 0) & needy & (self.eat_cd == 0)
         has_plain = self.n_gap > 0
         has_ench = self.n_egap > 0
         # ench gapple preferred when health is low (bot learns exact timing;
@@ -422,26 +538,65 @@ class DuelEnv:
         self.saturation = np.where(finishing, 20.0, self.saturation)
         self.absorb = np.where(finishing & self.ate_ench,
                                 ENCH_GAPPLE_ABSORB, self.absorb)
+        self.eat_cd = np.where(finishing, 40, self.eat_cd)
         self.eating = np.maximum(self.eating - 1, 0)
 
         # ---- splash pots: instant, at own feet, no downtime (HT3) ----------
-        do_heal = want_heal & (self.n_heal > 0)
-        do_str = want_str & (self.n_str > 0)
-        do_spd = want_spd & (self.n_spd > 0)
-        do_fir = want_fir & (self.n_fir > 0)
+        # Bridge mirror (BotController.governedSplash): one shared 30-tick
+        # throw cooldown across all four pot types; heal only below full HP,
+        # buffs only when mostly expired (<90%). Level-triggered + cooldown
+        # (not edge): holding re-throws every 30 ticks, so the scripted bots
+        # keep working unchanged, but the 4-tick chug-the-stack exploit that
+        # diag showed (splash button 1.00) is gone.
+        pre_health = self.health.copy()  # for low-HP use rewards (Q9)
+        pre_str = self.str_t.copy()      # for repot rewards (Q11)
+        self.spl_cd = np.maximum(self.spl_cd - 1, 0)
+        spl_ready = self.spl_cd == 0
+        do_heal = want_heal & (self.n_heal > 0) & spl_ready & (self.health < 20.0)
+        do_str = (want_str & (self.n_str > 0) & spl_ready
+                  & (self.str_t < 0.9 * STR_DURATION))
+        do_spd = (want_spd & (self.n_spd > 0) & spl_ready
+                  & (self.spd_t < 0.9 * SPD_DURATION))
+        do_fir = (want_fir & (self.n_fir > 0) & spl_ready
+                  & (self.fir_t < 0.9 * FIR_DURATION))
+        # weaving: self-throw at own feet. Allowed anytime we hold one and the
+        # effect is mostly expired. Shares the 30t splash governor like all pots.
+        do_weave = (want_weave & (self.n_weave > 0) & spl_ready
+                     & (self.weave_t < 0.9 * WEAVE_DURATION))
+        any_spl = do_heal | do_str | do_spd | do_fir | do_weave
+        self.spl_cd = np.where(any_spl, 30, self.spl_cd)
+        self.blk_sup = np.where(any_spl, 10, self.blk_sup)
         self.n_heal = np.where(do_heal, self.n_heal - 1, self.n_heal)
         self.n_str = np.where(do_str, self.n_str - 1, self.n_str)
         self.n_spd = np.where(do_spd, self.n_spd - 1, self.n_spd)
         self.n_fir = np.where(do_fir, self.n_fir - 1, self.n_fir)
+        self.n_weave = np.where(do_weave, self.n_weave - 1, self.n_weave)
+        self.weave_t = np.where(do_weave, WEAVE_DURATION, self.weave_t)
+        self.weave = self.weave_t > 0
         self.health = np.minimum(self.health + np.where(do_heal, SPLASH_HEAL, 0.0), 20.0)
         self.str_t = np.where(do_str, STR_DURATION, self.str_t)
         self.spd_t = np.where(do_spd, SPD_DURATION, self.spd_t)
         self.fir_t = np.where(do_fir, FIR_DURATION, self.fir_t)
 
-        # ---- buff/fire timers ---------------------------------------------
+        # ---- buff/fire/weave timers ---------------------------------------
         self.str_t = np.maximum(self.str_t - 1, 0)
         self.spd_t = np.maximum(self.spd_t - 1, 0)
         self.fir_t = np.maximum(self.fir_t - 1, 0)
+        self.weave_t = np.maximum(self.weave_t - 1, 0)
+        self.weave = self.weave_t > 0
+
+        # ---- webs: inside check BEFORE movement so slow applies this tick ---
+        # 2 patches per env; dist in XZ to patch centre < WEB_RADIUS = stuck.
+        self.was_in_web = self.in_web.copy()
+        d2 = np.zeros((n, 2), bool)
+        for w in range(N_WEBS):
+            dxw = self.px - self.web_x[:, w][:, None]
+            dzw = self.pz - self.web_z[:, w][:, None]
+            d2 |= (dxw * dxw + dzw * dzw) < (WEB_RADIUS * WEB_RADIUS)
+        self.in_web = d2
+        web_mult = np.where(self.in_web,
+                            np.where(self.weave_t > 0, WEAVE_WEB_MULT, BASE_WEB_MULT),
+                            1.0)
 
         # ---- saturation drain (sprint drains; eating restores, resolved in combat section)
         self.saturation = np.maximum(
@@ -457,7 +612,7 @@ class DuelEnv:
         mx *= norm
         mz *= norm
 
-        spd_mult = np.where(self.spd_t > 0, SPD_MULT, 1.0)
+        spd_mult = np.where(self.spd_t > 0, SPD_MULT, 1.0) * web_mult
         speed = np.where(self.sprinting, SPRINT_SPEED, WALK_SPEED) * spd_mult
         # Drag is applied to the existing velocity, then input accel is added.
         # With GROUND_DRAG=0.546 this lands on the real 4.317 / 5.612 b/s, which
@@ -511,10 +666,17 @@ class DuelEnv:
         self.hurt_timer = np.maximum(self.hurt_timer - 1, 0)
         self.since_hit += 1
         self.since_hurt += 1
+        self.since_opp_whiff += 1
+        self.since_took_crit += 1
+        self.since_str_out += 1
         # fire burn: 1 HP/s through armour unless Fire Res is up
         burning = (self.fire_t > 0) & (self.fir_t == 0)
         self.health = np.where(burning & (self.tick % 20 == 0), self.health - 1.0, self.health)
         self.fire_t = np.maximum(self.fire_t - 1, 0)
+
+        # Str expiry: became 0 this tick without re-potting (Q11 repot window).
+        # (do_str would have refilled it above, so a 1 -> 0 edge is natural expiry.)
+        self.since_str_out = np.where((pre_str == 1) & (self.str_t == 0), 0, self.since_str_out)
 
         # ---- combat ---------------------------------------------------------
         # Snapshot who is alive *before* anyone swings. Vanilla lets both
@@ -524,6 +686,7 @@ class DuelEnv:
         alive = self.health > 0
         damage_dealt = np.zeros((n, 2), np.float32)
         whiffed = np.zeros((n, 2), bool)
+        bonus = np.zeros((n, 2), np.float32)  # HT3 gamesense rewards for this tick
 
         for p in (0, 1):
             o = 1 - p
@@ -547,7 +710,7 @@ class DuelEnv:
             # attack produced one "whiff" per tick and made attacking strictly bad.
             auto = self.cooldown[:, p] >= COOLDOWN_TICKS * 0.9
             attacking = (want_attack[:, p] & (~self.prev_attack[:, p] | auto)
-                         & alive[:, p])
+                         & alive[:, p] & ~self.blocking[:, p])
             hit = (attacking & in_reach & (self.hurt_timer[:, o] == 0)
                    & alive[:, o])
             whiffed[:, p] = attacking & ~hit
@@ -577,10 +740,13 @@ class DuelEnv:
             facing = (to_atk_x * def_fx + to_atk_z * def_fz) / to_atk_n
             blocked = self.blocking[:, o] & (facing > -0.17)  # ~100 deg half-angle
 
-            # ---- shield disable: sprint-(axe|sword) vs raised shield --------
-            # HT3 attribute-swaps, so the sword disables too. Disabling hit
-            # deals damage but NO knockback (the stun: victim holds S).
-            disabling = (hit & blocked & self.sprinting[:, p]
+            # ---- shield disable: sprint-AXE vs raised shield ONLY ----------
+            # Vanilla: only the axe disables. Sword sprint-hits never disable,
+            # so brute-forcing a turtle with the sword is just weak-chip + KB.
+            # HT3 predicts the shield, 1-tick attribute-swaps sword->axe, lands
+            # the sprint-axe disable, then swaps back. Disabling hit deals
+            # damage but NO knockback (the stun: victim holds S).
+            disabling = (hit & blocked & self.sprinting[:, p] & axe_out
                          & (self.shield_off[:, o] == 0))
             self.shield_off[:, o] = np.where(disabling, SHIELD_DISABLE_TICKS,
                                               self.shield_off[:, o])
@@ -596,18 +762,36 @@ class DuelEnv:
             hit = hit & (self.eating[:, p] == 0)
             self.health[:, o] -= applied
             damage_dealt[:, p] = applied
+            # ---- HT3 gamesense rewards (agents.md) ------------------------
+            first = (self.ep_dmg[:, p] == 0) & (applied > 0)
+            bonus[:, p] += np.where(first & crit & axe_out, R_OPENER, 0.0)
+            bonus[:, p] += np.where((applied > 0) & (self.saturation[:, p] >= 18.0), R_SAT_HIT, 0.0)
+            bonus[:, p] += np.where((applied > 0) & crit & (self.since_opp_whiff[:, p] <= 20), R_WHIFFPUNISH, 0.0)
+            bonus[:, p] += np.where((applied > 0) & crit & (self.since_took_crit[:, p] <= 20), R_CRITBACK, 0.0)
+            bonus[:, p] += np.where(disabling, R_DISABLE, 0.0)
+            bonus[:, o] += np.where(hit & blocked & ~disabling, R_BLOCK, 0.0)
+            # charge discipline: full-charge hits pay, weak-chip hits get taxed.
+            # This is what stops the 40%-charge poke spam (diag: weak hits).
+            bonus[:, p] += np.where((applied > 0) & (charge >= 0.9), R_FULL, 0.0)
+            bonus[:, p] += np.where((applied > 0) & (charge < 0.6), R_WEAK, 0.0)
+            self.since_took_crit[:, o] = np.where(crit & hit & (applied > 0), 0, self.since_took_crit[:, o])
             self.hurt_timer[:, o] = np.where(hit & (applied > 0), HURT_IMMUNITY, self.hurt_timer[:, o])
             self.since_hit[:, p] = np.where(hit, 0, self.since_hit[:, p])
             self.since_hurt[:, o] = np.where(applied > 0, 0, self.since_hurt[:, o])
-            self.cooldown[:, p] = np.where(attacking & ~axe_out, 0.0, self.cooldown[:, p])
-            self.axe_cd[:, p] = np.where(attacking & axe_out, 0.0, self.axe_cd[:, p])
+            # Shared attack lockout: ANY swing resets BOTH weapon cooldowns.
+            # Vanilla has one attackStrength ticker, so sword->axe->sword flapping
+            # never bought free hits. The old separate timers let the policy
+            # alternate weapons for ~2x DPS, which is why it swapped every swing.
+            # Now swapping only earns when it buys a disable (R_DISABLE).
+            self.cooldown[:, p] = np.where(attacking, 0.0, self.cooldown[:, p])
+            self.axe_cd[:, p] = np.where(attacking, 0.0, self.axe_cd[:, p])
             # Fire Aspect II lights the target (no-op through Fire Res)
             self.fire_t[:, o] = np.where(hit & (applied > 0), FIRE_TICKS, self.fire_t[:, o])
 
             # ---- knockback (vanilla: halve current horizontal, add strength) --
             # Disabling hits deal damage but no KB (HT3 stun: victim holds S).
             kb_mult = np.where(disabling, 0.0, 1.0)
-            strength_h = (BASE_KNOCKBACK_H + np.where(self.sprinting[:, p], SPRINT_KNOCKBACK_BONUS_H, 0.0)) * kb_mult
+            strength_h = (BASE_KNOCKBACK_H * np.where(self.sprinting[:, p], SPRINT_KNOCKBACK_MULT, 1.0)) * kb_mult
             strength_v = BASE_KNOCKBACK_V
             kx = f_x[:, p] * strength_h
             kz = f_z[:, p] * strength_h
@@ -636,15 +820,92 @@ class DuelEnv:
                         "z": float(self.pz[i, o]),
                     })
 
+        # punish windows arm after both seats have swung (whiffed is per-seat)
+        self.since_opp_whiff[:, 0] = np.where(whiffed[:, 1], 0, self.since_opp_whiff[:, 0])
+        self.since_opp_whiff[:, 1] = np.where(whiffed[:, 0], 0, self.since_opp_whiff[:, 1])
+
+        # ---- saturation regen (vanilla ~1 HP / 4s while saturated) -----------
+        # This is what makes the HT3 golden rule real: fighting saturated
+        # backfills damage, fighting dry does not (Q2).
+        regen_tick = (self.ep_len % 80 == 79)
+        regen = regen_tick[:, None] & (self.saturation > 0) & (self.health < 20.0) & (self.health > 0)
+        self.health = np.minimum(self.health + np.where(regen, 1.0, 0.0), 20.0)
+        self.saturation = np.maximum(self.saturation - np.where(regen, 1.0, 0.0), 0.0)
+
         # ---- rewards + termination -----------------------------------------
         self.prev_attack = want_attack.copy()
+        self.prev_swap = want_swap.copy()
         rew = R_DAMAGE * damage_dealt - R_DAMAGE * damage_dealt[:, ::-1] + R_WHIFF * whiffed
 
         # potential-based approach shaping: closing the gap outside reach pays,
         # opening it costs the same. Bounded, cannot be farmed by orbiting.
         pen = np.maximum(self._dist() - REACH, 0.0)
-        rew += (R_APPROACH * (self.prev_pen - pen))[:, None]
+        gap_delta = pen - self.prev_pen
+        rew += (-R_APPROACH * gap_delta)[:, None]
         self.prev_pen = pen
+
+        # ---- cowardice clock: bleed while nobody deals damage -------------
+        # Bloodless ticks accumulate a capped penalty, added ONCE at
+        # timeout (folding it per-tick would double-count through the
+        # value function: V learns the drip AND eats the timeout too).
+        # A long honest fight resets the clock on every hit, so only
+        # stalling is punished. Episodes that end in a kill ignore it.
+        bloodless = (damage_dealt.sum(axis=1) <= 0.0)
+        self.coward = np.where(bloodless,
+                               np.maximum(self.coward + R_COWARD_TICK, R_COWARD_CAP),
+                               0.0)
+        # per-seat stall bills, same bloodless gate, own caps.
+        d_now = self._dist()
+        far_now = (d_now > REACH + 1.0)[:, None]
+        turtling = self.blocking & far_now
+        self.turtle_bill = np.where(bloodless[:, None],
+                                    np.maximum(self.turtle_bill + np.where(
+                                        turtling, R_TURTLE_TICK, 0.0), R_TURTLE_CAP),
+                                    0.0)
+        stalling = (self.eating > 0)
+        self.eat_bill = np.where(bloodless[:, None],
+                                 np.maximum(self.eat_bill + np.where(
+                                     stalling, R_STALL_EAT_TICK, 0.0), R_STALL_EAT_CAP),
+                                 0.0)
+        # ---- HT3 event / posture rewards (agents.md) ----------------------
+        d = self._dist()
+        far = d[:, None] > REACH + 1.0
+        inrange = d[:, None] < REACH
+        # eat / pot discipline (Q7, Q8, Q9)
+        rew += np.where(finishing & (self.health <= 12.0) & (d[:, None] > REACH), R_EAT_SAFE, 0.0)
+        rew += np.where(do_heal & (pre_health <= 12.0), R_POT_HEAL, 0.0)
+        rew += np.where(use_ench & far, R_EGAP_WASTE, 0.0)
+        # repot instantly on expiry (Q11): str re-thrown while the window is fresh
+        repotted = do_str & (self.since_str_out <= 60)
+        rew += np.where(repotted, R_REPOT, 0.0)
+        # attribute-swap discipline: every 1-tick swap costs unless it buys a disable.
+        # R_DISABLE (+0.20) still outpays ~20 swaps, so predicted shield-breaks win.
+        rew += np.where(swap_edge, R_SWAP, 0.0)
+        # always sprint close (user callout): tiny per-tick pay for sprinting
+        # with forward input inside 6 blocks. Crit rewards still outpay it when
+        # a no-sprint crit is actually the right call, so timing survives.
+        close = d[:, None] < 6.0
+        rew += np.where(self.sprinting & (fwd_in > 0.1) & close, R_SPRINT_CLOSE, 0.0)
+        # webs: bleed while stuck, pay the escape, pay weaving-in-web (HT3)
+        rew += np.where(self.in_web, R_IN_WEB, 0.0)
+        escaped = self.was_in_web & ~self.in_web
+        rew += np.where(escaped, R_WEB_ESCAPE, 0.0)
+        rew += np.where(do_weave & self.in_web, R_WEAVE_USE, 0.0)
+        # look-down-to-throw is instant in sim (no pitch cost), so no extra shaping
+        # eating / splashing while full HP + saturated is wasteful — not free (diag: block 0.98, eat 0.71)
+        rew += np.where(start_eat & (self.saturation >= 18.0) & (self.health >= 18.0), R_EAT_WASTE, 0.0)
+        rew += np.where(do_heal & (pre_health >= 18.0), R_POT_WASTE, 0.0)
+        # shield held up when no one is in range — raise the turtle penalty (Q12, diag: block 0.98)
+        rew += np.where(self.blocking & far, R_TURTLE, 0.0)
+        # block is still too sticky: punish pure blocking while out of reach even before the turtle window
+        rew += np.where(self.blocking & far, R_BLOCK_OUT_OF_RANGE, 0.0)
+        # backed to the wall is death (Q15)
+        margin = np.minimum(self.arena - np.abs(self.px), self.arena - np.abs(self.pz))
+        rew += np.where(margin < 2.0, R_EDGE, 0.0)
+        # shield disabled: play passive, hold distance (Q13). Potential-based
+        # like approach, so it cannot be farmed by hiding.
+        rew += np.where(self.shield_off > 0, (R_SHELTER * gap_delta)[:, None], 0.0)
+        rew += bonus
         rew = rew.astype(np.float32)
 
         dead = self.health <= 0
@@ -657,9 +918,16 @@ class DuelEnv:
         if done.any():
             win = np.where(dead[:, 0] & ~dead[:, 1], -1.0,
                            np.where(dead[:, 1] & ~dead[:, 0], 1.0, 0.0)).astype(np.float32)
-            # timeout with no kill: both sides lose (see R_TIMEOUT).
+            # timeout with no kill: both sides lose, worse than losing a
+            # fight. R_TIMEOUT plus the stall bills accrued while bloodless:
+            # cowardice (shared), out-of-range turtling (per-seat), and
+            # bloodless eating (per-seat). A loss pays -R_WIN + damage dealt
+            # (you fought); a turtle-draw pays the full timeout + stall
+            # bill (you refused).
             win = np.where(timeout & ~any_dead, 0.0, win)
-            rew = np.where((timeout & ~any_dead)[:, None], rew + R_TIMEOUT, rew)
+            rew = np.where((timeout & ~any_dead)[:, None],
+                           rew + R_TIMEOUT + self.coward[:, None]
+                           + self.turtle_bill + self.eat_bill, rew)
             rew[:, 0] += np.where(done, -win, 0.0)
             rew[:, 1] += np.where(done, win, 0.0)
 
@@ -683,30 +951,145 @@ class DuelEnv:
 
         return self.obs(), rew, done, info
 
+    def _apply_drill(self, idx: np.ndarray):
+        """Overwrite spawn state for drill envs (by env index).
+
+        Split of drill_p: 40% heal-or-die, 35% web-escape, 25% repot.
+        Types: 0 melee, 1 heal, 2 web, 3 repot. The policy cannot see the id:
+        HP / webs / timers are all ordinary obs features.
+        """
+        if self.drill_p <= 0.0 or len(idx) == 0:
+            return
+        roll = self.rng.random(len(idx))
+        # thresholds within the drilled share
+        h_heal = roll < self.drill_p * 0.40
+        h_web = (roll >= self.drill_p * 0.40) & (roll < self.drill_p * 0.75)
+        h_repot = (roll >= self.drill_p * 0.75) & (roll < self.drill_p)
+        if h_heal.any():
+            h = idx[h_heal]
+            self.drill[h] = 1
+            hp = self.rng.uniform(8.0, 10.0, size=len(h)).astype(np.float32)
+            self.health[h, 0] = hp
+            self.health[h, 1] = hp
+            self.saturation[h] = self.rng.uniform(6.0, 12.0,
+                                                   size=(len(h), 2)).astype(np.float32)
+            d = self.rng.uniform(5.0, 7.0, size=len(h)).astype(np.float32)
+            side = np.where(self.rng.random(len(h)) < 0.5, -1.0, 1.0).astype(np.float32)
+            self.px[h, 0] = -d / 2 * side
+            self.px[h, 1] = d / 2 * side
+            self.pz[h] = 0.0
+            self.yaw[h, 0] = np.where(side > 0, 90.0, 270.0)
+            self.yaw[h, 1] = np.where(side > 0, 270.0, 90.0)
+            self.prev_pen[h] = np.maximum(d - REACH, 0.0)
+        if h_web.any():
+            h = idx[h_web]
+            self.drill[h] = 2
+            # both spawn IN a web: drop a patch on each fighter, mid range.
+            # The lesson is escape + weave (50% speed) vs 25% crawl.
+            d = self.rng.uniform(4.0, 6.0, size=len(h)).astype(np.float32)
+            side = np.where(self.rng.random(len(h)) < 0.5, -1.0, 1.0).astype(np.float32)
+            self.px[h, 0] = -d / 2 * side
+            self.px[h, 1] = d / 2 * side
+            self.pz[h] = 0.0
+            self.web_x[h, 0] = self.px[h, 0]
+            self.web_z[h, 0] = self.pz[h, 0]
+            self.web_x[h, 1] = self.px[h, 1]
+            self.web_z[h, 1] = self.pz[h, 1]
+            self.in_web[h] = True
+            self.was_in_web[h] = True
+            self.str_t[h] = STR_DURATION
+            self.yaw[h, 0] = np.where(side > 0, 90.0, 270.0)
+            self.yaw[h, 1] = np.where(side > 0, 270.0, 90.0)
+            self.prev_pen[h] = np.maximum(d - REACH, 0.0)
+        if h_repot.any():
+            h = idx[h_repot]
+            self.drill[h] = 3
+            # str about to expire (40-80 ticks left), full HP, mid range.
+            # Every tick is the repot-instantly lesson R_REPOT pays for.
+            self.str_t[h] = self.rng.integers(40, 80, size=(len(h), 2)).astype(np.int32)
+            d = self.rng.uniform(4.0, 6.0, size=len(h)).astype(np.float32)
+            side = np.where(self.rng.random(len(h)) < 0.5, -1.0, 1.0).astype(np.float32)
+            self.px[h, 0] = -d / 2 * side
+            self.px[h, 1] = d / 2 * side
+            self.pz[h] = 0.0
+            self.yaw[h, 0] = np.where(side > 0, 90.0, 270.0)
+            self.yaw[h, 1] = np.where(side > 0, 270.0, 90.0)
+            self.prev_pen[h] = np.maximum(d - REACH, 0.0)
+
     def _reset_mask(self, mask: np.ndarray):
+        # Full kit reset per finished env. This must mirror reset(): the old
+        # version only cleared movement/HP and left saturation, buffs,
+        # inventories and eat state to rot - so after the first death every
+        # respawned duel fought with depleted kits (damage 13 -> 0.8 collapse
+        # at iter ~50) and training learned to fight naked. Spawn geometry
+        # matches reset() too (SPAWN_DISTANCE apart, random side), not the
+        # old hardcoded 8-block face-off.
         m = mask
-        self.px[m, 0] = -4.0
-        self.px[m, 1] = 4.0
+        self.px[m, 0] = -SPAWN_DISTANCE / 2
+        self.px[m, 1] = SPAWN_DISTANCE / 2
         self.py[m] = 0.0
         self.pz[m] = 0.0
         self.vx[m] = 0.0
         self.vy[m] = 0.0
         self.vz[m] = 0.0
-        self.yaw[m, 0] = 90.0
-        self.yaw[m, 1] = 270.0
+        side = np.where(self.rng.random(int(m.sum())) < 0.5, -1.0, 1.0).astype(np.float32)
+        self.px[m, 0] = -SPAWN_DISTANCE / 2 * side
+        self.px[m, 1] = SPAWN_DISTANCE / 2 * side
+        self.yaw[m, 0] = np.where(side > 0, 90.0, 270.0)
+        self.yaw[m, 1] = np.where(side > 0, 270.0, 90.0)
         self.pitch[m] = 0.0
         self.on_ground[m] = True
         self.sprinting[m] = False
         self.health[m] = 20.0
+        self.saturation[m] = 20.0
+        self.absorb[m] = 0.0
+        self.axe_cd[m] = AXE_COOLDOWN_TICKS
+        self.has_axe[m] = False
+        self.blocking[m] = False
+        self.raise_t[m] = 0
+        self.shield_off[m] = 0
+        self.fire_t[m] = 0
+        self.str_t[m] = STR_DURATION
+        self.spd_t[m] = SPD_DURATION
+        self.fir_t[m] = FIR_DURATION
+        self.weave[m] = False
+        self.weave_t[m] = 0
+        self.n_weave[m] = N_WEAVE_POTS
+        self.in_web[m] = False
+        self.was_in_web[m] = False
+        wside = np.where(self.rng.random((int(m.sum()), N_WEBS)) < 0.5, -1.0, 1.0).astype(np.float32)
+        self.web_x[m] = self.rng.uniform(-8.0, 8.0, size=(int(m.sum()), N_WEBS)).astype(np.float32)
+        self.web_z[m] = self.rng.uniform(4.0, 10.0, size=(int(m.sum()), N_WEBS)).astype(np.float32) * wside
+        self.n_gap[m] = 128
+        self.n_egap[m] = 2
+        self.n_heal[m] = N_HEAL_POTS
+        self.n_str[m] = N_STR_POTS
+        self.n_spd[m] = N_SPD_POTS
+        self.n_fir[m] = N_FIR_POTS
+        self.eating[m] = 0
+        self.ate_ench[m] = False
         self.cooldown[m] = COOLDOWN_TICKS
         self.hurt_timer[m] = 0
         self.since_hit[m] = 999
         self.since_hurt[m] = 999
+        self.since_opp_whiff[m] = 999
+        self.since_took_crit[m] = 999
+        self.since_str_out[m] = 999
         self.prev_attack[m] = False
+        self.prev_swap[m] = False
+        self.spl_cd[m] = 0
+        self.eat_cd[m] = 0
+        self.blk_sup[m] = 0
+        self.coward[m] = 0.0
+        self.turtle_bill[m] = 0.0
+        self.eat_bill[m] = 0.0
         self.prev_pen[m] = np.maximum(self._dist()[m] - REACH, 0.0)
         self.ep_ret[m] = 0
         self.ep_dmg[m] = 0
         self.ep_len[m] = 0
+        # respawns also roll drills, so the mix holds all run long.
+        self.drill[m] = 0
+        self._apply_drill(np.nonzero(m)[0])
 
     # ------------------------------------------------------------------ viewer
     def snapshot(self, env_id: int = 0) -> dict:

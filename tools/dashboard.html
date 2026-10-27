@@ -52,6 +52,7 @@
   <div class="panel"><h2>eval vs scripted <span class="hint">- win / draw / loss %</span></h2><canvas id="c-eval"></canvas></div>
   <div class="panel"><h2>eval damage <span class="hint">- dealt vs taken</span></h2><canvas id="c-dmg"></canvas></div>
   <div class="panel"><h2>losses <span class="hint">- policy / value</span></h2><canvas id="c-pv"></canvas></div>
+  <div class="panel"><h2>drills <span class="hint">- heal / web / repot win %</span></h2><canvas id="c-drill"></canvas></div>
 </div>
 <div class="panel"><h2>training events</h2><div id="events"></div></div>
 <div id="status"></div>
@@ -62,15 +63,22 @@ document.getElementById('runname').textContent = run;
 const url = '../' + run + '/metrics.jsonl';
 
 let rows = [];
+let fails = 0;
 async function poll() {
   try {
-    const r = await fetch(url + '?t=' + Date.now());
-    if (!r.ok) { setStatus('waiting for ' + url + ' ...'); return; }
+    // cache-bust + no-store: colab proxies love to serve a stale copy once
+    // and then "stop updating". This forces a fresh read every poll.
+    const r = await fetch(url + '?t=' + Date.now(), {cache: 'no-store'});
+    if (!r.ok) { setStatus('waiting for ' + url + ' ... (' + r.status + ')'); return; }
     const txt = await r.text();
     rows = txt.trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
+    fails = 0;
     render();
-    setStatus(rows.length + ' points | updated ' + new Date().toLocaleTimeString());
-  } catch (e) { setStatus('fetch failed: ' + e); }
+    setStatus('LIVE ' + rows.length + ' points | ' + run + ' | updated ' + new Date().toLocaleTimeString());
+  } catch (e) {
+    fails++;
+    setStatus('fetch failed (' + fails + '): ' + e + ' | ' + url);
+  }
 }
 function setStatus(s){ document.getElementById('status').textContent = s; }
 const last = a => a.length ? a[a.length-1] : undefined;
@@ -79,7 +87,7 @@ const fin = v => v !== null && v !== undefined && isFinite(v);
 function card(k, v, cls) {
   return `<div class="card ${cls||''}"><div class="k">${k}</div><div class="v">${v}</div></div>`;
 }
-function draw(id, series) {
+function draw(id, series, opts) {
   const cv = document.getElementById(id), ctx = cv.getContext('2d');
   const W = cv.width = cv.clientWidth * 2, H = cv.height = 380;
   ctx.clearRect(0,0,W,H);
@@ -98,19 +106,61 @@ function draw(id, series) {
     ctx.beginPath(); ctx.moveTo(8,y); ctx.lineTo(W-8,y); ctx.stroke();
   }
   ctx.fillText(mx.toFixed(2), 12, 26); ctx.fillText(mn.toFixed(2), 12, H-12);
-  // bars rising from the bottom, grouped side-by-side for multi-series
-  const slot = (W-16)/Math.max(n,1), bw = Math.max(2, slot*0.7/series.length);
+  // bars grow from the zero line, so negatives hang below it
+  const yZero = 0 <= mn ? H-10 : 0 >= mx ? 10 : Y(0);
+  if (mn < 0 && mx > 0) {
+    ctx.strokeStyle = '#8a8578'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(8,yZero); ctx.lineTo(W-8,yZero); ctx.stroke();
+    ctx.strokeStyle = '#2b2823'; ctx.lineWidth = 1;
+  }
+  const slot = (W-16)/Math.max(n,1), bw = Math.max(1, slot/series.length);
   let li = 0;
+  // delta marker: for the latest bar, pin an up/down chip at its head (the tip
+  // far from the zero line) plus a dotted hairline at the previous value's
+  // height, so "it went up/down" is visible on the end of the bar, not the base.
+  if (opts && opts.delta) {
+    series.forEach((s, si) => {
+      let li = -1;
+      for (let i = s.vals.length - 1; i >= 0; i--) if (fin(s.vals[i])) { li = i; break; }
+      if (li < 1) return;
+      const v = s.vals[li];
+      let pv;
+      for (let i = li - 1; i >= 0; i--) if (fin(s.vals[i])) { pv = s.vals[i]; break; }
+      if (pv === undefined || Math.abs(v - pv) < 1e-12) return;
+      const up = v > pv;
+      const cx = X(li) - bw*series.length/2 + si*bw + bw/2;
+      const y1 = Y(v);
+      // dotted hairline at the old height, across the moved bar
+      ctx.strokeStyle = up ? 'rgba(255,106,61,0.55)' : 'rgba(192,57,43,0.55)';
+      ctx.setLineDash([4,4]);
+      ctx.beginPath();
+      ctx.moveTo(cx - bw/2, Y(pv));
+      ctx.lineTo(cx + bw/2, Y(pv));
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // chip just past the head of the bar
+      ctx.fillStyle = up ? '#ff6a3d' : '#c0392b';
+      ctx.font = '21px monospace';
+      const cy = y1 <= yZero ? y1 - 6 : y1 + 24;
+      ctx.fillText(up ? '\u25b2' : '\u25bc', cx - 7, cy);
+    });
+  }
   series.forEach((s,si) => {
     ctx.fillStyle = s.color;
     s.vals.forEach((v,i) => { if(!fin(v)) return;
       const cx = X(i) - bw*series.length/2 + si*bw;
-      const y1 = Y(v), y0 = H-10, w = Math.max(bw-1,1);
+      const y1 = Y(v), y0 = yZero, w = bw;
       const top = Math.min(y0,y1), h = Math.abs(y1-y0), cap = Math.min(10, h);
+      const capY = y1 >= y0 ? top : top + h - cap;
       ctx.globalAlpha = 0.5;
       ctx.fillRect(cx, top, w, h);
       ctx.globalAlpha = 1.0;
-      ctx.fillRect(cx, top, w, cap); });
+      ctx.fillRect(cx, capY, w, cap);
+      // head notch: pokes past the tip so the head reads even on tiny bars
+      const notch = Math.max(2, bw/4);
+      if (y1 >= y0) ctx.fillRect(cx, y1, w, notch);
+      else ctx.fillRect(cx, y1 - notch, w, notch);
+    });
     ctx.fillText('\u25a0 ' + s.label, 130 + li*190, 26); li++;
   });
 }
@@ -130,7 +180,7 @@ function render() {
     card('ep length', (T&&fin(T.ep_len))?Math.round(T.ep_len):'-') +
     card('win %', E?(E.win_rate*100).toFixed(1)+'%':'-', 'gold') +
     card('episodes', (T&&fin(T.eps))?T.eps:'-');
-  draw('c-ret', [{label:'ret', color:'#ff6a3d', vals:pts.map(r=>r.ret)}]);
+  draw('c-ret', [{label:'ret', color:'#ff6a3d', vals:pts.map(r=>r.ret)}], {delta:true});
   draw('c-ent', [{label:'entropy', color:'#2dd4bf', vals:pts.map(r=>r.ent)}]);
   draw('c-len', [{label:'ep_len', color:'#e8b23a', vals:pts.map(r=>r.ep_len)}]);
   draw('c-eval', [
@@ -145,6 +195,11 @@ function render() {
   draw('c-pv', [
     {label:'pi', color:'#e8b23a', vals:pts.map(r=>r.pi)},
     {label:'v', color:'#2dd4bf', vals:pts.map(r=>r.v)},
+  ]);
+  draw('c-drill', [
+    {label:'heal', color:'#2dd4bf', vals:evs.map(r=>fin(r.heal_win)?r.heal_win*100:NaN)},
+    {label:'web', color:'#ff6a3d', vals:evs.map(r=>fin(r.web_win)?r.web_win*100:NaN)},
+    {label:'repot', color:'#e8b23a', vals:evs.map(r=>fin(r.repot_win)?r.repot_win*100:NaN)},
   ]);
   const ev2 = rows.filter(r => r.event).slice(-40).reverse();
   document.getElementById('events').innerHTML = ev2.map(r => {
