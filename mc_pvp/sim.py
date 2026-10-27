@@ -34,6 +34,11 @@ GROUND_DRAG = BLOCK_SLIPPERINESS * AIR_DRAG              # 0.546
 # Vanilla scales ground accel by 0.16277136 / drag^3 (~1.0 on default ground),
 # and the empirical 4.317 / 5.612 b/s speeds work out to accel = speed * 0.98.
 INPUT_ACCEL_SCALE = 0.98
+USE_SLOW = 0.2           # CERTAIN (decompiled LocalPlayer.aiStep: input *= 0.2F
+                            # while using an item; wiki: blocking slows to sneaking pace).
+                            # Sprint does NOT cancel - the flag persists and
+                            # sprint-then-block stays faster than walk-block (MC-152728,
+                            # confirmed live). Only the legs are slow.
 WALK_SPEED = 0.1            # CERTAIN -> 4.317 blocks/s
 SPRINT_SPEED = 0.13         # CERTAIN -> 5.612 blocks/s
 AIR_ACCEL = 0.02            # CERTAIN
@@ -179,7 +184,8 @@ R_SHELTER = 0.024     # 2x approach pull, outward, while own shield disabled (Q1
 # ---- combo / discipline rewards (weak-hit + swap-spam fixes) ---------------
 R_FULL = 0.05         # hit landed at >=90% charge: full-charge discipline
 R_WEAK = -0.04        # hit landed at <60% charge: weak-hit spam tax
-R_SWAP = -0.01        # per attribute-swap edge: swaps must earn (disable), not flap
+R_SWAP = -0.03        # per attribute-swap edge: swaps must earn (disable), not flap.
+                        # A disable (+0.20) outpays ~7 swaps; flapping every swing bleeds.
 R_SPRINT_CLOSE = 0.001  # per tick sprinting with forward input, close up (<6 blocks)
                         # small: crits (which need no-sprint) still outpay it when timed
 # ---- web / weaving rewards (phase 2) ------------------------------------
@@ -614,6 +620,16 @@ class DuelEnv:
 
         spd_mult = np.where(self.spd_t > 0, SPD_MULT, 1.0) * web_mult
         speed = np.where(self.sprinting, SPRINT_SPEED, WALK_SPEED) * spd_mult
+        # Using an item (shield button held + available, or gapple going
+        # down): vanilla input x0.2. Sprint persists (see above) - a
+        # sprint-blocker still moves faster than a walk-blocker, but both
+        # crawl. This is what makes far-away shielding terrible: the enemy
+        # closes for free while you sneak. can_raise is the button-held +
+        # available gate (raise delay only gates the block EFFECT, not the slow).
+        using_item = can_raise | (self.eating > 0)
+        use_mult = np.where(using_item, USE_SLOW, 1.0)
+        mx = mx * use_mult
+        mz = mz * use_mult
         # Drag is applied to the existing velocity, then input accel is added.
         # With GROUND_DRAG=0.546 this lands on the real 4.317 / 5.612 b/s, which
         # the "accel then drag" ordering does not.
@@ -881,11 +897,14 @@ class DuelEnv:
         # attribute-swap discipline: every 1-tick swap costs unless it buys a disable.
         # R_DISABLE (+0.20) still outpays ~20 swaps, so predicted shield-breaks win.
         rew += np.where(swap_edge, R_SWAP, 0.0)
-        # always sprint close (user callout): tiny per-tick pay for sprinting
-        # with forward input inside 6 blocks. Crit rewards still outpay it when
-        # a no-sprint crit is actually the right call, so timing survives.
+        # always sprint close (user callout): per-tick pay for sprinting
+        # with forward input inside 6 blocks. Grounded only (no air-sprint
+        # subsidy: jumps are for crits, which need NO sprint) and never
+        # while slowed by shield/gapple (that IS the turtle, don't pay it).
+        # Crit rewards still outpay it when a cut is the right call.
         close = d[:, None] < 6.0
-        rew += np.where(self.sprinting & (fwd_in > 0.1) & close, R_SPRINT_CLOSE, 0.0)
+        rew += np.where(self.sprinting & (fwd_in > 0.1) & close & self.on_ground
+                        & ~using_item, R_SPRINT_CLOSE, 0.0)
         # webs: bleed while stuck, pay the escape, pay weaving-in-web (HT3)
         rew += np.where(self.in_web, R_IN_WEB, 0.0)
         escaped = self.was_in_web & ~self.in_web

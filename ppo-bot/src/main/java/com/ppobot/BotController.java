@@ -466,8 +466,9 @@ public final class BotController {
         HeroActions.setStrafing(pack, out.mu[3]);
         // HeroBot's pack.setSprinting() only stores a flag it never reads
         // back in onUpdate, so drive real sprint state on the player itself.
-        // Mirror the sim: sprint needs forward input, and sprint cancels on
-        // hit (applied below via shouldCancelSprint).
+        // Mirror the sim: sprint needs forward input. Sprint does NOT cancel
+        // on hit (SPRINT_CANCELS_ON_HIT = False, HT3 ground truth: that is
+        // exactly why W/S-tap spacing works).
         boolean wantSprint = out.disc[D_SPRINT] && out.mu[2] > 0.1f;
         bot.setSprinting(wantSprint);
         // Hunger gates vanilla sprint: keep topped up so the bot never walks.
@@ -536,14 +537,20 @@ public final class BotController {
             } else if (usingShield) {
                 bot.stopUsingItem();
             }
-            // splash: instant throw at own feet, then back to the sword
+            // splash: thrown at the bot's OWN feet. Look down first (Q11:
+            // "look down and throw is always faster"), throw, restore aim.
+            // Without this the pot flies along the combat aim - at the enemy -
+            // and heals THEM. Sim applies to self, so the bridge must too.
             if (splSlot >= 0 && !bot.isUsingItem()) {
+                float savePitch = bot.getXRot();
+                HeroActions.look(pack, bot.getYRot(), 70.0f);
                 selectSlot(pack, splSlot);
                 if (rightClick(bot, InteractionHand.MAIN_HAND)) {
                     reselectWeapon = true;
                     lastSplashTick = tickCount;
                     blockSuppress = 10;   // open up after potting, don't re-turtle
                 }
+                HeroActions.look(pack, bot.getYRot(), savePitch);
             }
         }
         wasUsing = bot.isUsingItem();

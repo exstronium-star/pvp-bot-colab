@@ -29,7 +29,7 @@ import time
 import numpy as np
 import torch
 
-from mc_pvp.bots import ScriptedBot
+from mc_pvp.bots import ScriptedBot, AggroBot, TurtleBot, RunnerBot
 from mc_pvp.ppo import PPO, ActorCritic
 from mc_pvp.sim import COOLDOWN_TICKS, EYE_HEIGHT, DuelEnv  # noqa: F401
 
@@ -437,7 +437,15 @@ def main():
     ppo = PPO(obs_dim, lr=args.lr, hidden=args.hidden, batch=args.batch)
     ppo.policy.to(device)
     seat = np.random.default_rng(args.seed).integers(0, 2, size=E)
-    bot = ScriptedBot(E, np.random.default_rng(args.seed + 1))
+    # sparring rotation: the scripted dummy plus the three style bots.
+    # BOT envs roll one style per env per iter, so the learner faces axe
+    # openers (Aggro), live shields to crack (Turtle) and whiff-baits
+    # (Runner) - not just the dummy's rhythm. Eval stays ScriptedBot-only
+    # so the baseline number keeps meaning the same thing.
+    style_bots = [ScriptedBot(E, np.random.default_rng(args.seed + 1)),
+                  AggroBot(E, np.random.default_rng(args.seed + 2)),
+                  TurtleBot(E, np.random.default_rng(args.seed + 3)),
+                  RunnerBot(E, np.random.default_rng(args.seed + 4))]
     pool: list[dict] = []
     history: list[dict] = []
     start_it = 1
@@ -631,7 +639,11 @@ def main():
                 act = np.zeros((E, 2, DuelEnv.ACTION_DIM), np.float32)
                 act[slot_env, slot_seat] = pack_action(cont, disc)
                 if bot_envs.size:
-                    bot_act = bot.act(env)
+                    # role one style per env per iter: Aggro punishes
+                    # turtling, Turtle teaches the disable, Runner the
+                    # whiff-punish. Scripted stays the common case.
+                    style = style_bots[int(rng.integers(0, len(style_bots)))]
+                    bot_act = style.act(env)
                     act[bot_envs, other[bot_envs]] = bot_act[bot_envs,
                                                              other[bot_envs]]
                 for net, sel in frozen:

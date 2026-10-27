@@ -55,8 +55,10 @@ class ScriptedBot:
             act[:, p, sim.DuelEnv.A_FWD] = np.where(too_far, 1.0, np.where(too_close, -1.0, 0.0))
             act[:, p, sim.DuelEnv.A_STRAFE] = np.where(too_far | too_close, 0.0, self.strafe[:, p])
             # always sprint when closing or close (user callout): walk is for
-            # taps only. Sim crits need no-sprint, but the dummy hops to crit.
-            act[:, p, sim.DuelEnv.A_SPRINT] = (dist > 2.2).astype(np.float32)
+            # taps only. Grounded-gated: sim crits need falling + airborne +
+            # NOT sprinting, so the hop-crits below only work if the sprint bit
+            # drops in the air. (Aggro/Runner demos already do this.)
+            act[:, p, sim.DuelEnv.A_SPRINT] = ((dist > 2.2) & env.on_ground[:, p]).astype(np.float32)
 
             # --- crit hops ------------------------------------------------
             hop = (dist < 3.0) & env.on_ground[:, p] & (env.cooldown[:, p] > 6.0) & (self.rng.random(n) < 0.06)
@@ -392,10 +394,13 @@ class AggroBot:
                                         self.reset[:, p])
             tapping = (self.wtap[:, p] > 0) | (self.stap[:, p] > 0)
             resetting = self.reset[:, p] > 0
-            # --- weapon: axe while their shield is up, sword once it pops -
-            has_axe = env.has_axe[:, p]
-            want_axe = ~has_axe & (env.shield_off[:, o] == 0) & (dist < 12.0)
-            want_sword = has_axe & ((env.shield_off[:, o] > 0) | (dist > 12.0))
+            # --- weapon: sword is HOME. The axe comes out ONLY for the
+            # predicted-disable moment (their shield live, in range, grounded)
+            # then straight back. Axe-default meant slow 20t swings as the
+            # neutral game and taught the learner to flap (weak hits).
+            dis_op = (env.blocking[:, o] & (dist < 3.4) & env.on_ground[:, p])
+            want_axe = ~has_axe & dis_op
+            want_sword = has_axe & ~dis_op
             swap = ((want_axe & ~self.prev_want_axe[:, p])
                     | (want_sword & ~self.prev_want_sword[:, p]))
             self.prev_want_axe[:, p] = want_axe
