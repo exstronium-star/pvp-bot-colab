@@ -184,6 +184,18 @@ R_SHELTER = 0.024     # 2x approach pull, outward, while own shield disabled (Q1
 # ---- combo / discipline rewards (weak-hit + swap-spam fixes) ---------------
 R_FULL = 0.05         # hit landed at >=90% charge: full-charge discipline
 R_WEAK = -0.04        # hit landed at <60% charge: weak-hit spam tax
+R_CLEAN = 0.06        # hit landed at >=60% charge while untouched for 20+ ticks:
+                        # clean contact. Symmetric R_DAMAGE nets ~0 on even trades,
+                        # and a baby brain only makes even trades - so early fighting
+                        # has no gradient and it learns not to fight at all. This pays
+                        # hit-and-don't-get-hit-back IMMEDIATELY (on the hit tick),
+                        # and graduates into whiff-punish/crit-back (which outpay it)
+                        # as timing improves. Skill ladder stays monotone:
+                        # clean (0.06) < full (0.05+0.06) < crit-back (0.10) < punish
+                        # (0.15) < disable (0.20). Anti-farm: needs real applied damage
+                        # (blocked hits pay nothing), a 20-tick untouch window the
+                        # opponent must grant (styles never cooperate), and >=0.6 charge
+                        # (weak spam still eats R_WEAK). Stalling earns zero (no hits).
 R_SWAP = -0.03        # per attribute-swap edge: swaps must earn (disable), not flap.
                         # A disable (+0.20) outpays ~7 swaps; flapping every swing bleeds.
 R_SPRINT_CLOSE = 0.001  # per tick sprinting with forward input, close up (<6 blocks)
@@ -790,6 +802,13 @@ class DuelEnv:
             # This is what stops the 40%-charge poke spam (diag: weak hits).
             bonus[:, p] += np.where((applied > 0) & (charge >= 0.9), R_FULL, 0.0)
             bonus[:, p] += np.where((applied > 0) & (charge < 0.6), R_WEAK, 0.0)
+            # Clean contact: charged hit while untouched for 20+ ticks.
+            # Gate is pre-hit (since_hurt counts up AFTER the loop ticks it),
+            # so landing this hit resets the clock at >=20 with no drip-feed:
+            # each qualifying hit is one discrete 0.06 event on the hit tick.
+            clean = ((applied > 0) & (charge >= 0.6)
+                     & (self.since_hurt[:, p] >= 20))
+            bonus[:, p] += np.where(clean, R_CLEAN, 0.0)
             self.since_took_crit[:, o] = np.where(crit & hit & (applied > 0), 0, self.since_took_crit[:, o])
             self.hurt_timer[:, o] = np.where(hit & (applied > 0), HURT_IMMUNITY, self.hurt_timer[:, o])
             self.since_hit[:, p] = np.where(hit, 0, self.since_hit[:, p])
